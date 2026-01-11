@@ -215,6 +215,12 @@ export class AgentManager extends EventEmitter {
       args.push('--base-branch', options.baseBranch);
     }
 
+    // Use origin/branch instead of local branch for worktree creation
+    // Default is local branch (useLocalBranch=true), so only pass flag when explicitly false
+    if (options.useLocalBranch === false) {
+      args.push('--use-origin-branch');
+    }
+
     // Note: --parallel was removed from run.py CLI - parallel execution is handled internally by the agent
     // The options.parallel and options.workers are kept for future use or logging purposes
     // Note: Model configuration is read from task_metadata.json by the Python scripts,

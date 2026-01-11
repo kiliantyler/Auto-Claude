@@ -146,6 +146,22 @@ export function GeneralSettings({
                 }
               />
             </div>
+            <div className="flex items-center justify-between pt-2">
+              <div className="space-y-0.5">
+                <Label className="font-normal text-foreground">
+                  {t('projectSections.general.useLocalBranch')}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('projectSections.general.useLocalBranchDescription')}
+                </p>
+              </div>
+              <Switch
+                checked={settings.useLocalBranch ?? true}
+                onCheckedChange={(checked) =>
+                  setSettings({ ...settings, useLocalBranch: checked })
+                }
+              />
+            </div>
           </section>
 
           <Separator />

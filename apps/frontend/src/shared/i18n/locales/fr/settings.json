@@ -312,7 +312,9 @@
       "title": "Général",
       "description": "Auto-Build et configuration de l'agent",
       "useClaudeMd": "Utiliser CLAUDE.md",
-      "useClaudeMdDescription": "Inclure les instructions CLAUDE.md dans le contexte de l'agent"
+      "useClaudeMdDescription": "Inclure les instructions CLAUDE.md dans le contexte de l'agent",
+      "useLocalBranch": "Utiliser la branche locale pour les worktrees",
+      "useLocalBranchDescription": "Créer les worktrees depuis la branche locale au lieu de origin (plus rapide, fonctionne hors ligne)"
     },
     "claude": {
       "title": "Auth Claude",

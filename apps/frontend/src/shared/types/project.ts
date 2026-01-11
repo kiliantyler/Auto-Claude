@@ -26,6 +26,8 @@ export interface ProjectSettings {
   mainBranch?: string;
   /** Include CLAUDE.md instructions in agent system prompt (default: true) */
   useClaudeMd?: boolean;
+  /** Use local branch instead of origin/branch for worktree creation (default: true) */
+  useLocalBranch?: boolean;
 }
 
 export interface NotificationSettings {
