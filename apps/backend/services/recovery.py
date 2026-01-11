@@ -441,6 +441,10 @@ class RecoveryManager:
         """
         Mark a subtask as needing human intervention.
 
+        This updates both:
+        - attempt_history.json: For tracking recovery state
+        - implementation_plan.json: For get_next_subtask to skip this subtask
+
         Args:
             subtask_id: ID of the subtask
             reason: Why it's stuck
@@ -466,6 +470,50 @@ class RecoveryManager:
             history["subtasks"][subtask_id]["status"] = "stuck"
 
         self._save_attempt_history(history)
+
+        # Also update implementation_plan.json to mark subtask as failed
+        # This ensures get_next_subtask skips this subtask and moves to the next one
+        self._mark_subtask_failed_in_plan(subtask_id, reason)
+
+    def _mark_subtask_failed_in_plan(self, subtask_id: str, reason: str) -> None:
+        """
+        Mark a subtask as failed in implementation_plan.json.
+
+        This allows get_next_subtask to skip stuck subtasks and continue
+        with other pending work.
+
+        Args:
+            subtask_id: ID of the subtask
+            reason: Why it failed
+        """
+        plan_file = self.spec_dir / "implementation_plan.json"
+        if not plan_file.exists():
+            return
+
+        try:
+            with open(plan_file, "r") as f:
+                plan_data = json.load(f)
+
+            # Find and update the subtask
+            updated = False
+            for phase in plan_data.get("phases", []):
+                for subtask in phase.get("subtasks", []):
+                    if subtask.get("id") == subtask_id:
+                        subtask["status"] = "failed"
+                        subtask["notes"] = f"Marked stuck: {reason}"
+                        updated = True
+                        break
+                if updated:
+                    break
+
+            if updated:
+                plan_data["updated_at"] = datetime.now().isoformat()
+                with open(plan_file, "w") as f:
+                    json.dump(plan_data, f, indent=2, ensure_ascii=False)
+
+        except (OSError, json.JSONDecodeError) as e:
+            # Log but don't fail - this is a best-effort sync
+            print(f"Warning: Could not update implementation_plan.json: {e}")
 
     def get_stuck_subtasks(self) -> list[dict]:
         """
