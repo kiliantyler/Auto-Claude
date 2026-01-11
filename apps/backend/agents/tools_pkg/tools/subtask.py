@@ -5,10 +5,12 @@ Subtask Management Tools
 Tools for managing subtask status in implementation_plan.json.
 """
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from implementation_plan import ImplementationPlan
+from implementation_plan.subtask import SubtaskStatus
 
 try:
     from claude_agent_sdk import tool
@@ -44,7 +46,11 @@ def create_subtask_tools(spec_dir: Path, project_dir: Path) -> list:
         {"subtask_id": str, "status": str, "notes": str},
     )
     async def update_subtask_status(args: dict[str, Any]) -> dict[str, Any]:
-        """Update subtask status in the implementation plan."""
+        """Update subtask status in the implementation plan.
+
+        Uses ImplementationPlan class to ensure overall plan status is
+        recalculated based on subtask states (via update_status_from_subtasks).
+        """
         subtask_id = args["subtask_id"]
         status = args["status"]
         notes = args.get("notes", "")
@@ -72,18 +78,20 @@ def create_subtask_tools(spec_dir: Path, project_dir: Path) -> list:
             }
 
         try:
-            with open(plan_file) as f:
-                plan = json.load(f)
+            # Load plan using ImplementationPlan class
+            plan = ImplementationPlan.load(plan_file)
 
             # Find and update the subtask
             subtask_found = False
-            for phase in plan.get("phases", []):
-                for subtask in phase.get("subtasks", []):
-                    if subtask.get("id") == subtask_id:
-                        subtask["status"] = status
+            status_enum = SubtaskStatus(status)
+
+            for phase in plan.phases:
+                for subtask in phase.subtasks:
+                    if subtask.id == subtask_id:
+                        subtask.status = status_enum
                         if notes:
-                            subtask["notes"] = notes
-                        subtask["updated_at"] = datetime.now(timezone.utc).isoformat()
+                            subtask.notes = notes
+                        subtask.updated_at = datetime.now(timezone.utc).isoformat()
                         subtask_found = True
                         break
                 if subtask_found:
@@ -99,11 +107,9 @@ def create_subtask_tools(spec_dir: Path, project_dir: Path) -> list:
                     ]
                 }
 
-            # Update plan metadata
-            plan["last_updated"] = datetime.now(timezone.utc).isoformat()
-
-            with open(plan_file, "w") as f:
-                json.dump(plan, f, indent=2)
+            # Save plan - this calls update_status_from_subtasks() to recalculate
+            # the overall plan status based on subtask states
+            plan.save(plan_file)
 
             return {
                 "content": [
@@ -114,12 +120,12 @@ def create_subtask_tools(spec_dir: Path, project_dir: Path) -> list:
                 ]
             }
 
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": f"Error: Invalid JSON in implementation_plan.json: {e}",
+                        "text": f"Error: Invalid status value: {e}",
                     }
                 ]
             }
