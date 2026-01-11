@@ -212,11 +212,12 @@ Verify:""")
 2. **Read the files to modify** (if any) to understand current implementation
 3. **Implement the subtask** following the patterns exactly
 4. **Run verification** and fix any issues
-5. **Commit your changes:**
+5. **Commit your changes** using conventional commit format:
    ```bash
-   git add .
-   git commit -m "auto-claude: {subtask_id} - {description[:50]}"
+   git add . ':!.auto-claude'
+   git commit -m "feat|fix|refactor(scope): {description[:50]}"
    ```
+   Choose the appropriate type: feat (new feature), fix (bug fix), refactor, docs, test, chore
 6. **Update the plan** - set this subtask's status to "completed" in implementation_plan.json
 
 ## Quality Checklist

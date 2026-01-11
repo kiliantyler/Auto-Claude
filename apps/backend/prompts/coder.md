@@ -755,11 +755,22 @@ git add . ':!.auto-claude'
 # 2. Run git status to see what git sees
 # 3. Adjust your paths accordingly
 
-git commit -m "auto-claude: Complete [subtask-id] - [subtask description]
+git commit -m "feat|fix|refactor(scope): [subtask description]
 
+Subtask: [subtask-id]
 - Files modified: [list]
 - Verification: [type] - passed
 - Phase progress: [X]/[Y] subtasks complete"
+
+# Use conventional commit types based on what the subtask does:
+# - feat: new feature or capability
+# - fix: bug fix
+# - refactor: code restructuring without behavior change
+# - docs: documentation changes
+# - test: adding/updating tests
+# - chore: maintenance tasks
+# - perf: performance improvements
+# - style: formatting, whitespace changes
 ```
 
 **CRITICAL**: The `:!.auto-claude` pathspec exclusion ensures spec files are NEVER committed.
