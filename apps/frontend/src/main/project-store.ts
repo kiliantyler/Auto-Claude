@@ -2,7 +2,7 @@ import { app } from 'electron';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, Dirent } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import type { Project, ProjectSettings, Task, TaskStatus, TaskMetadata, ImplementationPlan, ReviewReason, PlanSubtask } from '../shared/types';
+import type { Project, ProjectSettings, Task, TaskStatus, TaskMetadata, ImplementationPlan, ReviewReason, PlanSubtask, ExecutionPhase } from '../shared/types';
 import { DEFAULT_PROJECT_SETTINGS, AUTO_BUILD_PATHS, getSpecsDir } from '../shared/constants';
 import { getAutoBuildPath, isInitialized } from './project-initializer';
 import { getTaskWorktreeDir } from './worktree-paths';
@@ -464,6 +464,29 @@ export class ProjectStore {
         const stagedInMainProject = planWithStaged?.stagedInMainProject;
         const stagedAt = planWithStaged?.stagedAt;
 
+        // Derive execution progress from plan status
+        // This ensures the UI shows correct phase (e.g., "Coding") instead of just "running"
+        const executionPhaseMap: Record<string, ExecutionPhase> = {
+          'planning': 'planning',
+          'coding': 'coding',
+          'in_progress': 'coding',  // Default active phase
+          'review': 'qa_review',
+          'qa_review': 'qa_review',
+          'qa_fixing': 'qa_fixing',
+          'completed': 'complete',
+          'done': 'complete',
+          'failed': 'failed'
+        };
+        const planStatus = plan?.status as string | undefined;
+        const derivedPhase = planStatus ? executionPhaseMap[planStatus] : undefined;
+        const executionProgress = derivedPhase ? {
+          phase: derivedPhase,
+          phaseProgress: 0,
+          overallProgress: subtasks.length > 0
+            ? Math.round((subtasks.filter(s => s.status === 'completed').length / subtasks.length) * 100)
+            : 0
+        } : undefined;
+
         // Determine title - check if feature looks like a spec ID (e.g., "054-something-something")
         let title = plan?.feature || plan?.title || dir.name;
         const looksLikeSpecId = /^\d{3}-/.test(title);
@@ -498,6 +521,7 @@ export class ProjectStore {
           stagedAt,
           location, // Add location metadata (main vs worktree)
           specsPath: specPath, // Add full path to specs directory
+          executionProgress, // Derived from plan status for correct UI display
           createdAt: new Date(plan?.created_at || Date.now()),
           updatedAt: new Date(plan?.updated_at || Date.now())
         });
