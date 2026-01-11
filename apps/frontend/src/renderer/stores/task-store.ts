@@ -319,6 +319,37 @@ export function stopTask(taskId: string): void {
 }
 
 /**
+ * Reset a task completely - deletes worktree, execution artifacts, and moves to backlog
+ * Keeps spec.md so the task definition remains, but clears all execution state
+ * This allows starting fresh with the latest repo state
+ */
+export async function resetTask(taskId: string): Promise<boolean> {
+  const store = useTaskStore.getState();
+
+  try {
+    const result = await window.electronAPI.resetTask(taskId);
+    if (result.success) {
+      // Update local state: clear all execution state and move to backlog
+      store.updateTask(taskId, {
+        status: 'backlog',
+        subtasks: [],  // Clear subtasks - they'll be regenerated on next run
+        logs: [],      // Clear logs
+        executionProgress: {
+          phase: 'idle',
+          message: 'Task reset',
+          phaseProgress: 0,
+          overallProgress: 0
+        }
+      });
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Submit review for a task
  */
 export async function submitReview(

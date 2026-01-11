@@ -53,6 +53,11 @@ export const taskMock = {
     console.warn('[Browser Mock] stopTask called');
   },
 
+  resetTask: async () => {
+    console.warn('[Browser Mock] resetTask called');
+    return { success: true };
+  },
+
   submitReview: async () => ({ success: true }),
 
   // Task archive operations

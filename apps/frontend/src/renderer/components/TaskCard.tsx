@@ -28,7 +28,7 @@ import {
   TASK_STATUS_COLUMNS,
   TASK_STATUS_LABELS
 } from '../../shared/constants';
-import { startTask, stopTask, checkTaskRunning, recoverStuckTask, isIncompleteHumanReview, archiveTasks } from '../stores/task-store';
+import { startTask, stopTask, resetTask, checkTaskRunning, recoverStuckTask, isIncompleteHumanReview, archiveTasks } from '../stores/task-store';
 import type { Task, TaskCategory, ReviewReason, TaskStatus } from '../../shared/types';
 
 // Category icon mapping
@@ -245,6 +245,18 @@ export const TaskCard = memo(function TaskCard({ task, onClick, onStatusChange }
     const result = await archiveTasks(task.projectId, [task.id]);
     if (!result.success) {
       console.error('[TaskCard] Failed to archive task:', task.id, result.error);
+    }
+  };
+
+  const handleReset = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    // Confirm before resetting since it's destructive
+    if (!window.confirm(t('dialogs.confirmResetTask', 'Are you sure you want to reset this task? This will delete all progress and start fresh.'))) {
+      return;
+    }
+    const success = await resetTask(task.id);
+    if (!success) {
+      console.error('[TaskCard] Failed to reset task:', task.id);
     }
   };
 
@@ -543,6 +555,19 @@ export const TaskCard = memo(function TaskCard({ task, onClick, onStatusChange }
                   <DropdownMenuLabel>{t('actions.moveTo')}</DropdownMenuLabel>
                   <DropdownMenuSeparator />
                   {statusMenuItems}
+                  {/* Show reset option for tasks that have started (not in backlog) */}
+                  {task.status !== 'backlog' && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onClick={handleReset}
+                        className="text-destructive focus:text-destructive"
+                      >
+                        <RotateCcw className="mr-2 h-4 w-4" />
+                        {t('actions.resetTask', 'Reset Task')}
+                      </DropdownMenuItem>
+                    </>
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
             )}

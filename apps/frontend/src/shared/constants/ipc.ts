@@ -23,6 +23,7 @@ export const IPC_CHANNELS = {
   TASK_UPDATE: 'task:update',
   TASK_START: 'task:start',
   TASK_STOP: 'task:stop',
+  TASK_RESET: 'task:reset',  // Reset task completely (delete worktree, spec, start fresh)
   TASK_REVIEW: 'task:review',
   TASK_UPDATE_STATUS: 'task:updateStatus',
   TASK_RECOVER_STUCK: 'task:recoverStuck',

@@ -3,7 +3,8 @@ import { IPC_CHANNELS, AUTO_BUILD_PATHS, getSpecsDir } from '../../../shared/con
 import type { IPCResult, TaskStartOptions, TaskStatus } from '../../../shared/types';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
-import { spawnSync } from 'child_process';
+import { rm } from 'fs/promises';
+import { spawnSync, execFileSync } from 'child_process';
 import { AgentManager } from '../../agent';
 import { fileWatcher } from '../../file-watcher';
 import { findTaskAndProject } from './shared';
@@ -16,6 +17,7 @@ import {
 } from './plan-file-utils';
 import { findTaskWorktree } from '../../worktree-paths';
 import { projectStore } from '../../project-store';
+import { getToolPath } from '../../cli-tool-manager';
 
 /**
  * Atomic file write to prevent TOCTOU race conditions.
@@ -292,36 +294,132 @@ export function registerTaskExecutionHandlers(
     const { task, project } = findTaskAndProject(taskId);
 
     if (task && project) {
-      // Persist status to implementation_plan.json to prevent status flip-flop on refresh
-      // Uses shared utility for consistency with agent-events-handlers.ts
-      // IMPORTANT: Must persist to BOTH main project AND worktree (if exists)
-      // because getTasks() prefers the worktree version
-      // NOTE: This is now async and non-blocking for better UI responsiveness
       const mainPlanPath = getPlanPath(project, task);
       const worktreePath = findTaskWorktree(project.path, task.specId);
+
+      // Check if task is in early stages (planning phase with no completed coding work)
+      // If so, we should clean up the worktree so next start gets fresh repo state
+      let shouldCleanupWorktree = false;
+      try {
+        if (existsSync(mainPlanPath)) {
+          const planContent = readFileSync(mainPlanPath, 'utf-8');
+          const plan = JSON.parse(planContent);
+          const phases = plan.phases || [];
+
+          // Count completed subtasks (excluding any that are just "planning" related)
+          let hasCompletedCodingWork = false;
+          for (const phase of phases) {
+            const subtasks = phase.subtasks || phase.chunks || [];
+            for (const subtask of subtasks) {
+              if (subtask.status === 'completed') {
+                hasCompletedCodingWork = true;
+                break;
+              }
+            }
+            if (hasCompletedCodingWork) break;
+          }
+
+          // Also check execution phase - if still in planning/idle, safe to clean up
+          const executionPhase = task.executionProgress?.phase;
+          const isInPlanningPhase = !executionPhase || executionPhase === 'idle' || executionPhase === 'planning';
+
+          shouldCleanupWorktree = !hasCompletedCodingWork || isInPlanningPhase;
+
+          if (DEBUG) {
+            console.log(`[TASK_STOP] hasCompletedCodingWork=${hasCompletedCodingWork}, executionPhase=${executionPhase}, shouldCleanupWorktree=${shouldCleanupWorktree}`);
+          }
+        } else {
+          // No plan file means task hasn't started real work yet
+          shouldCleanupWorktree = true;
+        }
+      } catch (err) {
+        console.warn('[TASK_STOP] Could not check task progress, will not cleanup worktree:', err);
+      }
 
       setImmediate(async () => {
         const persistStart = Date.now();
         try {
-          // Persist to main project
-          const mainPersisted = await persistPlanStatus(mainPlanPath, 'backlog', project.id);
-          if (mainPersisted) {
-            console.warn('[TASK_STOP] Updated main plan status to backlog');
-          }
+          if (shouldCleanupWorktree && worktreePath) {
+            // Clean up worktree for tasks in planning phase
+            console.warn(`[TASK_STOP] Task in planning phase, cleaning up worktree: ${worktreePath}`);
 
-          // Also persist to worktree if it exists (this is the one getTasks() actually reads!)
-          if (worktreePath) {
+            // Get branch name before removing worktree
+            let branchName: string | null = null;
+            try {
+              branchName = execFileSync(getToolPath('git'), ['rev-parse', '--abbrev-ref', 'HEAD'], {
+                cwd: worktreePath,
+                encoding: 'utf-8'
+              }).trim();
+            } catch {
+              // Branch detection failed, not critical
+            }
+
+            // Remove the worktree
+            try {
+              execFileSync(getToolPath('git'), ['worktree', 'remove', '--force', worktreePath], {
+                cwd: project.path,
+                encoding: 'utf-8'
+              });
+              console.warn(`[TASK_STOP] Removed git worktree: ${worktreePath}`);
+
+              // Delete the branch if found
+              if (branchName && branchName !== 'HEAD' && !branchName.includes('(HEAD detached')) {
+                try {
+                  execFileSync(getToolPath('git'), ['branch', '-D', branchName], {
+                    cwd: project.path,
+                    encoding: 'utf-8'
+                  });
+                  console.warn(`[TASK_STOP] Deleted branch: ${branchName}`);
+                } catch {
+                  // Branch deletion failed, not critical
+                }
+              }
+            } catch (gitError) {
+              // If git worktree remove fails, try manual delete
+              console.warn(`[TASK_STOP] Git worktree remove failed, trying manual delete: ${gitError}`);
+              try {
+                await rm(worktreePath, { recursive: true, force: true });
+                execFileSync(getToolPath('git'), ['worktree', 'prune'], {
+                  cwd: project.path,
+                  encoding: 'utf-8'
+                });
+              } catch {
+                // Manual delete failed, not critical
+              }
+            }
+
+            // Also clean up the spec directory in main project since it will be recreated on next start
             const specsBaseDir = getSpecsDir(project.autoBuildPath);
-            const worktreePlanPath = path.join(
-              worktreePath,
-              specsBaseDir,
-              task.specId,
-              AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN
-            );
-            if (existsSync(worktreePlanPath)) {
-              const worktreePersisted = await persistPlanStatus(worktreePlanPath, 'backlog', project.id);
-              if (worktreePersisted) {
-                console.warn('[TASK_STOP] Updated worktree plan status to backlog');
+            const mainSpecDir = path.join(project.path, specsBaseDir, task.specId);
+            if (existsSync(mainSpecDir)) {
+              try {
+                await rm(mainSpecDir, { recursive: true, force: true });
+                console.warn(`[TASK_STOP] Cleaned up spec directory: ${mainSpecDir}`);
+              } catch {
+                // Spec cleanup failed, not critical
+              }
+            }
+          } else {
+            // Task has completed work, just persist status
+            const mainPersisted = await persistPlanStatus(mainPlanPath, 'backlog', project.id);
+            if (mainPersisted) {
+              console.warn('[TASK_STOP] Updated main plan status to backlog');
+            }
+
+            // Also persist to worktree if it exists
+            if (worktreePath) {
+              const specsBaseDir = getSpecsDir(project.autoBuildPath);
+              const worktreePlanPath = path.join(
+                worktreePath,
+                specsBaseDir,
+                task.specId,
+                AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN
+              );
+              if (existsSync(worktreePlanPath)) {
+                const worktreePersisted = await persistPlanStatus(worktreePlanPath, 'backlog', project.id);
+                if (worktreePersisted) {
+                  console.warn('[TASK_STOP] Updated worktree plan status to backlog');
+                }
               }
             }
           }
@@ -335,7 +433,159 @@ export function registerTaskExecutionHandlers(
           console.error('[TASK_STOP] Failed to persist plan status:', err);
         }
       });
-      // Note: File not found is expected for tasks without a plan file (persistPlanStatus handles ENOENT)
+    }
+  });
+
+  /**
+   * Reset a task completely - delete worktree, spec directory, and move to backlog
+   * This allows starting fresh with the latest repo state
+   */
+  ipcMain.handle(IPC_CHANNELS.TASK_RESET, async (_, taskId: string): Promise<IPCResult> => {
+    const DEBUG = process.env.DEBUG === 'true';
+
+    // First, stop the task if running
+    agentManager.killTask(taskId);
+    fileWatcher.unwatch(taskId);
+
+    const { task, project } = findTaskAndProject(taskId);
+
+    if (!task || !project) {
+      return { success: false, error: 'Task not found' };
+    }
+
+    const worktreePath = findTaskWorktree(project.path, task.specId);
+    const specsBaseDir = getSpecsDir(project.autoBuildPath);
+    const mainSpecDir = path.join(project.path, specsBaseDir, task.specId);
+
+    try {
+      // 1. Remove worktree if exists
+      if (worktreePath) {
+        console.warn(`[TASK_RESET] Removing worktree: ${worktreePath}`);
+
+        // Get branch name before removing
+        let branchName: string | null = null;
+        try {
+          branchName = execFileSync(getToolPath('git'), ['rev-parse', '--abbrev-ref', 'HEAD'], {
+            cwd: worktreePath,
+            encoding: 'utf-8'
+          }).trim();
+        } catch {
+          // Branch detection failed, not critical
+        }
+
+        // Remove the worktree
+        try {
+          execFileSync(getToolPath('git'), ['worktree', 'remove', '--force', worktreePath], {
+            cwd: project.path,
+            encoding: 'utf-8'
+          });
+          console.warn(`[TASK_RESET] Removed git worktree: ${worktreePath}`);
+
+          // Delete the branch if found
+          if (branchName && branchName !== 'HEAD' && !branchName.includes('(HEAD detached')) {
+            try {
+              execFileSync(getToolPath('git'), ['branch', '-D', branchName], {
+                cwd: project.path,
+                encoding: 'utf-8'
+              });
+              console.warn(`[TASK_RESET] Deleted branch: ${branchName}`);
+            } catch {
+              // Branch deletion failed, not critical
+            }
+          }
+        } catch (gitError) {
+          // If git worktree remove fails, try manual delete
+          console.warn(`[TASK_RESET] Git worktree remove failed, trying manual delete: ${gitError}`);
+          try {
+            await rm(worktreePath, { recursive: true, force: true });
+            execFileSync(getToolPath('git'), ['worktree', 'prune'], {
+              cwd: project.path,
+              encoding: 'utf-8'
+            });
+            console.warn(`[TASK_RESET] Manually deleted worktree directory`);
+          } catch (rmError) {
+            console.error(`[TASK_RESET] Failed to manually delete worktree: ${rmError}`);
+          }
+        }
+      }
+
+      // 2. Delete execution artifacts in spec directory, but KEEP spec.md (the task definition)
+      // Files to delete: implementation_plan.json, qa_report.md, QA_FIX_REQUEST.md, memory/, graphiti/
+      // Files to keep: spec.md (task definition), requirements.json, context.json
+      if (existsSync(mainSpecDir)) {
+        console.warn(`[TASK_RESET] Cleaning execution artifacts in: ${mainSpecDir}`);
+
+        const filesToDelete = [
+          'implementation_plan.json',
+          'qa_report.md',
+          'QA_FIX_REQUEST.md'
+        ];
+
+        const dirsToDelete = [
+          'memory',
+          'graphiti'
+        ];
+
+        // Delete specific files
+        for (const file of filesToDelete) {
+          const filePath = path.join(mainSpecDir, file);
+          if (existsSync(filePath)) {
+            try {
+              unlinkSync(filePath);
+              console.warn(`[TASK_RESET] Deleted: ${file}`);
+            } catch {
+              console.warn(`[TASK_RESET] Could not delete: ${file}`);
+            }
+          }
+        }
+
+        // Delete directories
+        for (const dir of dirsToDelete) {
+          const dirPath = path.join(mainSpecDir, dir);
+          if (existsSync(dirPath)) {
+            try {
+              await rm(dirPath, { recursive: true, force: true });
+              console.warn(`[TASK_RESET] Deleted directory: ${dir}`);
+            } catch {
+              console.warn(`[TASK_RESET] Could not delete directory: ${dir}`);
+            }
+          }
+        }
+
+        console.warn(`[TASK_RESET] Cleaned execution artifacts (kept spec.md)`);
+      }
+
+      // 3. Update task status to backlog
+      const mainWindow = getMainWindow();
+      if (mainWindow) {
+        mainWindow.webContents.send(
+          IPC_CHANNELS.TASK_STATUS_CHANGE,
+          taskId,
+          'backlog'
+        );
+      }
+
+      // 4. Clear execution progress
+      if (mainWindow) {
+        mainWindow.webContents.send(
+          IPC_CHANNELS.TASK_EXECUTION_PROGRESS,
+          taskId,
+          { phase: 'idle', message: 'Task reset' },
+          project.id
+        );
+      }
+
+      // 5. Invalidate project store cache to force refresh
+      projectStore.invalidateTasksCache(project.id);
+
+      if (DEBUG) {
+        console.log(`[TASK_RESET] Task ${taskId} reset successfully`);
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error(`[TASK_RESET] Failed to reset task:`, error);
+      return { success: false, error: `Failed to reset task: ${error}` };
     }
   });
 
