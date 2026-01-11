@@ -9,6 +9,7 @@ Enhanced with colored output, icons, and better visual formatting.
 """
 
 import json
+import re
 from pathlib import Path
 
 from ui import (
@@ -420,14 +421,56 @@ def get_next_subtask(spec_dir: Path) -> dict | None:
 
         phases = plan.get("phases", [])
 
-        # Build a map of phase completion
+        # Build a map of phase completion with multiple key formats
+        # This handles both numeric phases (1, 2, 3) and string IDs ("phase-1-backend")
+        # as well as mismatched depends_on references
         phase_complete = {}
         for phase in phases:
-            phase_id = phase.get("id") or phase.get("phase")
+            phase_num = phase.get("phase")
+            phase_id = phase.get("id")
             subtasks = phase.get("subtasks", [])
-            phase_complete[phase_id] = all(
-                s.get("status") == "completed" for s in subtasks
-            )
+            is_complete = all(s.get("status") == "completed" for s in subtasks)
+
+            # Add entry for numeric phase number
+            if phase_num is not None:
+                phase_complete[phase_num] = is_complete
+                # Also add string version of the number
+                phase_complete[str(phase_num)] = is_complete
+
+            # Add entry for string ID if present
+            if phase_id:
+                phase_complete[phase_id] = is_complete
+
+        def is_dependency_satisfied(dep) -> bool:
+            """Check if a dependency is satisfied, handling various formats."""
+            # Direct lookup
+            if dep in phase_complete:
+                return phase_complete[dep]
+
+            # Try numeric conversion (handles "1" -> 1 or 1 -> "1")
+            if isinstance(dep, int):
+                if str(dep) in phase_complete:
+                    return phase_complete[str(dep)]
+            elif isinstance(dep, str):
+                # Try parsing as int
+                try:
+                    dep_num = int(dep)
+                    if dep_num in phase_complete:
+                        return phase_complete[dep_num]
+                except ValueError:
+                    pass
+
+                # Try extracting number from "phase-N-..." format
+                match = re.match(r"phase-(\d+)", dep)
+                if match:
+                    extracted_num = int(match.group(1))
+                    if extracted_num in phase_complete:
+                        return phase_complete[extracted_num]
+                    if str(extracted_num) in phase_complete:
+                        return phase_complete[str(extracted_num)]
+
+            # Dependency not found - assume not satisfied
+            return False
 
         # Find next available subtask
         for phase in phases:
@@ -435,13 +478,16 @@ def get_next_subtask(spec_dir: Path) -> dict | None:
             depends_on = phase.get("depends_on", [])
 
             # Check if dependencies are satisfied
-            deps_satisfied = all(phase_complete.get(dep, False) for dep in depends_on)
+            deps_satisfied = all(is_dependency_satisfied(dep) for dep in depends_on)
             if not deps_satisfied:
                 continue
 
-            # Find first pending subtask in this phase
+            # Find first pending or in_progress subtask in this phase
+            # in_progress subtasks are included to handle recovery from interrupted tasks
+            # where the subtask was started but not completed
             for subtask in phase.get("subtasks", []):
-                if subtask.get("status") == "pending":
+                status = subtask.get("status")
+                if status == "pending" or status == "in_progress":
                     return {
                         "phase_id": phase_id,
                         "phase_name": phase.get("name"),
