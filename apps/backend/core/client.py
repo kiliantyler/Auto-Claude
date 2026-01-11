@@ -486,6 +486,13 @@ def create_client(
     # Ensure SDK can access it via its expected env var
     os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
 
+    # Set project directory for security hooks
+    # This ensures bash_security_hook can find the correct .auto-claude-allowlist
+    # and security profile, regardless of the current working directory
+    from security.constants import PROJECT_DIR_ENV_VAR
+
+    os.environ[PROJECT_DIR_ENV_VAR] = str(project_dir.resolve())
+
     # Collect env vars to pass to SDK (ANTHROPIC_BASE_URL, etc.)
     sdk_env = get_sdk_env_vars()
 

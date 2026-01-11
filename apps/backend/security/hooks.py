@@ -73,18 +73,34 @@ async def bash_security_hook(
     # 4. Current working directory (fallback, may be incorrect in worktree mode)
     from .constants import PROJECT_DIR_ENV_VAR
 
-    cwd = os.environ.get(PROJECT_DIR_ENV_VAR)
+    # Debug: Print what we're getting
+    env_cwd = os.environ.get(PROJECT_DIR_ENV_VAR)
+    input_cwd = input_data.get("cwd")
+    context_cwd = context.cwd if context and hasattr(context, "cwd") else None
+    fallback_cwd = os.getcwd()
+    
+    print(f"[SECURITY_DEBUG] PROJECT_DIR_ENV_VAR: {env_cwd}")
+    print(f"[SECURITY_DEBUG] input_data cwd: {input_cwd}")
+    print(f"[SECURITY_DEBUG] context cwd: {context_cwd}")
+    print(f"[SECURITY_DEBUG] os.getcwd(): {fallback_cwd}")
+
+    cwd = env_cwd
     if not cwd:
-        cwd = input_data.get("cwd")
-    if not cwd and context and hasattr(context, "cwd"):
-        cwd = context.cwd
+        cwd = input_cwd
+    if not cwd and context_cwd:
+        cwd = context_cwd
     if not cwd:
-        cwd = os.getcwd()
+        cwd = fallback_cwd
+    
+    print(f"[SECURITY_DEBUG] Using cwd: {cwd}")
 
     # Get or create security profile
     # Note: In actual use, spec_dir would be passed through context
     try:
         profile = get_security_profile(Path(cwd))
+        print(f"[SECURITY_DEBUG] Profile loaded from: {profile.project_dir}")
+        print(f"[SECURITY_DEBUG] xcodebuild in stack: {'xcodebuild' in profile.stack_commands}")
+        print(f"[SECURITY_DEBUG] xcodebuild in custom: {'xcodebuild' in profile.custom_commands}")
     except Exception as e:
         # If profile creation fails, fall back to base commands only
         print(f"Warning: Could not load security profile: {e}")
@@ -111,6 +127,7 @@ async def bash_security_hook(
     for cmd in commands:
         # Check if command is allowed
         is_allowed, reason = is_command_allowed(cmd, profile)
+        print(f"[SECURITY_DEBUG] Checking command '{cmd}': allowed={is_allowed}, reason='{reason}'")
 
         if not is_allowed:
             return {

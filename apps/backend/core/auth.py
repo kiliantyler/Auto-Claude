@@ -38,6 +38,8 @@ SDK_ENV_VARS = [
     "API_TIMEOUT_MS",
     # Windows-specific: Git Bash path for Claude Code CLI
     "CLAUDE_CODE_GIT_BASH_PATH",
+    # Security: Project directory for security hooks to find allowlist
+    "AUTO_CLAUDE_PROJECT_DIR",
 ]
 
 
