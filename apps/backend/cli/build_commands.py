@@ -61,6 +61,7 @@ def handle_build_command(
     skip_qa: bool,
     force_bypass_approval: bool,
     base_branch: str | None = None,
+    use_local_branch: bool = True,
 ) -> None:
     """
     Handle the main build command.
@@ -77,6 +78,7 @@ def handle_build_command(
         skip_qa: Skip automatic QA validation
         force_bypass_approval: Force bypass approval check
         base_branch: Base branch for worktree creation (default: current branch)
+        use_local_branch: Use local branch instead of origin/branch (default: True)
     """
     # Lazy imports to avoid loading heavy modules
     from agent import run_autonomous_agent, sync_spec_to_source
@@ -204,6 +206,7 @@ def handle_build_command(
             workspace_mode,
             source_spec_dir=spec_dir,
             base_branch=base_branch,
+            use_local_branch=use_local_branch,
         )
         # Use the localized spec directory (inside worktree) for AI access
         if localized_spec_dir:

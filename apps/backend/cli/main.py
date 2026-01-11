@@ -231,6 +231,13 @@ Environment Variables:
         help="Base branch for creating worktrees (default: auto-detect or current branch)",
     )
 
+    # Branch source for worktree creation
+    parser.add_argument(
+        "--use-origin-branch",
+        action="store_true",
+        help="Use origin/branch instead of local branch for worktrees (fetches latest from remote)",
+    )
+
     # Batch task management
     parser.add_argument(
         "--batch-create",
@@ -406,6 +413,7 @@ def main() -> None:
         skip_qa=args.skip_qa,
         force_bypass_approval=args.force,
         base_branch=args.base_branch,
+        use_local_branch=not args.use_origin_branch,
     )
 
 
