@@ -208,7 +208,7 @@ function TaskDetailModalContent({ open, task, onOpenChange, onSwitchToTerminals,
       );
     }
 
-    if (task.status === 'backlog' || task.status === 'in_progress') {
+    if (task.status === 'backlog' || task.status === 'in_progress' || task.status === 'ai_review') {
       return (
         <Button
           variant={state.isRunning ? 'destructive' : 'default'}

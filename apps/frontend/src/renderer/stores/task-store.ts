@@ -121,7 +121,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             }))
           );
 
-          const allCompleted = subtasks.every((s) => s.status === 'completed');
+          const allCompleted = subtasks.length > 0 && subtasks.every((s) => s.status === 'completed');
           const anyFailed = subtasks.some((s) => s.status === 'failed');
           const anyInProgress = subtasks.some((s) => s.status === 'in_progress');
           const anyCompleted = subtasks.some((s) => s.status === 'completed');
@@ -133,9 +133,24 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           const activePhases: ExecutionPhase[] = ['planning', 'coding', 'qa_review', 'qa_fixing'];
           const isInActivePhase = t.executionProgress?.phase && activePhases.includes(t.executionProgress.phase);
 
-          if (!isInActivePhase) {
+          // Also protect in_progress tasks from being downgraded when there are no subtasks yet
+          // This happens during the planning phase before subtasks are created
+          const isActiveTask = t.status === 'in_progress' || t.status === 'ai_review';
+          const hasNoSubtasks = subtasks.length === 0;
+
+          // Don't downgrade human_review to ai_review - once a task reaches human_review,
+          // it should stay there until explicitly changed. This fixes the issue where
+          // task completion events would incorrectly reset the status.
+          const isAlreadyInHumanReview = t.status === 'human_review';
+          const isTaskComplete = t.executionProgress?.phase === 'complete';
+
+          if (!isInActivePhase && !(isActiveTask && hasNoSubtasks)) {
             if (allCompleted) {
-              status = 'ai_review';
+              // Only set to ai_review if not already in human_review or complete phase
+              // This prevents downgrading status when completion events arrive
+              if (!isAlreadyInHumanReview && !isTaskComplete) {
+                status = 'ai_review';
+              }
             } else if (anyFailed) {
               status = 'human_review';
               reviewReason = 'errors';

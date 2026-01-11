@@ -103,7 +103,8 @@ export const TaskCard = memo(function TaskCard({ task, onClick, onStatusChange }
     interval: null
   });
 
-  const isRunning = task.status === 'in_progress';
+  // Task is "running" if it's in_progress OR ai_review (QA agent is actively reviewing/fixing)
+  const isRunning = task.status === 'in_progress' || task.status === 'ai_review';
   const executionPhase = task.executionProgress?.phase;
   const hasActiveExecution = executionPhase && executionPhase !== 'idle' && executionPhase !== 'complete' && executionPhase !== 'failed';
 
@@ -503,7 +504,7 @@ export const TaskCard = memo(function TaskCard({ task, onClick, onStatusChange }
                 <Archive className="mr-1.5 h-3 w-3" />
                 {t('actions.archive')}
               </Button>
-            ) : (task.status === 'backlog' || task.status === 'in_progress') && (
+            ) : (task.status === 'backlog' || task.status === 'in_progress' || task.status === 'ai_review') && (
               <Button
                 variant={isRunning ? 'destructive' : 'default'}
                 size="sm"

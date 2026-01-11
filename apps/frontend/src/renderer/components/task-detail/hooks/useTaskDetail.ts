@@ -48,9 +48,10 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
   const [showConflictDialog, setShowConflictDialog] = useState(false);
 
   const selectedProject = useProjectStore((state) => state.getSelectedProject());
-  const isRunning = task.status === 'in_progress';
-  // isActiveTask includes ai_review for stuck detection (CHANGELOG documents this feature)
-  const isActiveTask = task.status === 'in_progress' || task.status === 'ai_review';
+  // Task is "running" if it's in_progress OR ai_review (QA agent is actively reviewing/fixing)
+  const isRunning = task.status === 'in_progress' || task.status === 'ai_review';
+  // isActiveTask is same as isRunning - kept for backward compatibility
+  const isActiveTask = isRunning;
   const needsReview = task.status === 'human_review';
   const executionPhase = task.executionProgress?.phase;
   const hasActiveExecution = executionPhase && executionPhase !== 'idle' && executionPhase !== 'complete' && executionPhase !== 'failed';
@@ -96,19 +97,37 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
     };
   }, [task.id, isActiveTask, hasCheckedRunning, executionPhase, task.executionProgress?.phase]);
 
-  // Handle scroll events in logs to detect if user scrolled up
-  const handleLogsScroll = (e: React.UIEvent<HTMLDivElement>) => {
+  // Track if we're programmatically scrolling (to ignore those scroll events)
+  const isAutoScrollingRef = useRef(false);
+
+  // Handle scroll events in logs to detect if user intentionally scrolled up
+  const handleLogsScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    // Ignore scroll events triggered by our auto-scroll
+    if (isAutoScrollingRef.current) return;
+
     const target = e.target as HTMLDivElement;
     const isNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
     setIsUserScrolledUp(!isNearBottom);
-  };
+  }, []);
 
   // Auto-scroll logs to bottom only if user hasn't scrolled up
+  // Triggers on both legacy logs (task.logs) and phase logs (phaseLogs) changes
   useEffect(() => {
     if (activeTab === 'logs' && logsEndRef.current && !isUserScrolledUp) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      // Mark that we're auto-scrolling so scroll handler ignores this
+      isAutoScrollingRef.current = true;
+
+      // Wait for DOM to update with new log entries before scrolling
+      requestAnimationFrame(() => {
+        logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+
+        // Reset the flag after scroll animation completes (smooth scroll takes ~300ms)
+        setTimeout(() => {
+          isAutoScrollingRef.current = false;
+        }, 350);
+      });
     }
-  }, [task.logs, activeTab, isUserScrolledUp]);
+  }, [task.logs, phaseLogs, activeTab, isUserScrolledUp]);
 
   // Reset scroll state when switching to logs tab
   useEffect(() => {
