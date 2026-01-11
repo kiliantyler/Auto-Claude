@@ -57,11 +57,33 @@ class WorktreeManager:
     a corresponding branch auto-claude/{spec-name}.
     """
 
-    def __init__(self, project_dir: Path, base_branch: str | None = None):
+    def __init__(
+        self,
+        project_dir: Path,
+        base_branch: str | None = None,
+        use_local_branch: bool = True,
+    ):
         self.project_dir = project_dir
         self.base_branch = base_branch or self._detect_base_branch()
+        self.use_local_branch = self._resolve_use_local_branch(use_local_branch)
         self.worktrees_dir = project_dir / ".auto-claude" / "worktrees" / "tasks"
         self._merge_lock = asyncio.Lock()
+
+    def _resolve_use_local_branch(self, default: bool) -> bool:
+        """
+        Resolve whether to use local branch for worktree creation.
+
+        Priority order:
+        1. USE_LOCAL_BRANCH environment variable (if set)
+        2. Passed default value (from project settings)
+
+        Returns:
+            True to use local branch, False to use origin/branch
+        """
+        env_value = os.getenv("USE_LOCAL_BRANCH")
+        if env_value is not None:
+            return env_value.lower() in ("true", "1", "yes")
+        return default
 
     def _detect_base_branch(self) -> str:
         """
@@ -380,29 +402,52 @@ class WorktreeManager:
         # Delete branch if it exists (from previous attempt)
         self._run_git(["branch", "-D", branch_name])
 
-        # Fetch latest from remote to ensure we have the most up-to-date code
-        # GitHub/remote is the source of truth, not the local branch
-        fetch_result = self._run_git(["fetch", "origin", self.base_branch])
-        if fetch_result.returncode != 0:
-            print(
-                f"Warning: Could not fetch {self.base_branch} from origin: {fetch_result.stderr}"
-            )
-            print("Falling back to local branch...")
-
-        # Determine the start point for the worktree
-        # Prefer origin/{base_branch} (remote) over local branch to ensure we have latest code
+        # Determine the start point for the worktree based on use_local_branch setting
         remote_ref = f"origin/{self.base_branch}"
         start_point = self.base_branch  # Default to local branch
 
-        # Check if remote ref exists and use it as the source of truth
-        check_remote = self._run_git(["rev-parse", "--verify", remote_ref])
-        if check_remote.returncode == 0:
-            start_point = remote_ref
-            print(f"Creating worktree from remote: {remote_ref}")
-        else:
-            print(
-                f"Remote ref {remote_ref} not found, using local branch: {self.base_branch}"
+        if self.use_local_branch:
+            # Use local branch directly (default behavior)
+            # This is faster and works offline, but may be behind remote
+            check_local = self._run_git(
+                ["rev-parse", "--verify", self.base_branch]
             )
+            if check_local.returncode == 0:
+                start_point = self.base_branch
+                print(f"Creating worktree from local branch: {self.base_branch}")
+            else:
+                # Local branch doesn't exist, try remote
+                print(
+                    f"Local branch {self.base_branch} not found, checking remote..."
+                )
+                fetch_result = self._run_git(["fetch", "origin", self.base_branch])
+                check_remote = self._run_git(["rev-parse", "--verify", remote_ref])
+                if check_remote.returncode == 0:
+                    start_point = remote_ref
+                    print(f"Creating worktree from remote: {remote_ref}")
+                else:
+                    raise WorktreeError(
+                        f"Branch {self.base_branch} not found locally or on remote"
+                    )
+        else:
+            # Use origin/branch (fetch latest from remote)
+            # This ensures worktree has latest code but requires network access
+            fetch_result = self._run_git(["fetch", "origin", self.base_branch])
+            if fetch_result.returncode != 0:
+                print(
+                    f"Warning: Could not fetch {self.base_branch} from origin: {fetch_result.stderr}"
+                )
+                print("Falling back to local branch...")
+
+            # Check if remote ref exists and use it
+            check_remote = self._run_git(["rev-parse", "--verify", remote_ref])
+            if check_remote.returncode == 0:
+                start_point = remote_ref
+                print(f"Creating worktree from remote: {remote_ref}")
+            else:
+                print(
+                    f"Remote ref {remote_ref} not found, using local branch: {self.base_branch}"
+                )
 
         # Create worktree with new branch from the start point (remote preferred)
         result = self._run_git(
