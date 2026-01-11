@@ -138,17 +138,18 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           const isActiveTask = t.status === 'in_progress' || t.status === 'ai_review';
           const hasNoSubtasks = subtasks.length === 0;
 
-          // Don't downgrade human_review to ai_review - once a task reaches human_review,
-          // it should stay there until explicitly changed. This fixes the issue where
-          // task completion events would incorrectly reset the status.
-          const isAlreadyInHumanReview = t.status === 'human_review';
+          // Don't downgrade human_review to ai_review ONLY when the task has fully completed
+          // (execution phase is 'complete'). This allows the status to be correctly updated
+          // to ai_review while the QA agent is still running (phase is qa_review/qa_fixing).
           const isTaskComplete = t.executionProgress?.phase === 'complete';
+          const isAlreadyInHumanReviewAndComplete = t.status === 'human_review' && isTaskComplete;
 
           if (!isInActivePhase && !(isActiveTask && hasNoSubtasks)) {
             if (allCompleted) {
-              // Only set to ai_review if not already in human_review or complete phase
-              // This prevents downgrading status when completion events arrive
-              if (!isAlreadyInHumanReview && !isTaskComplete) {
+              // Only set to ai_review if task hasn't completed and moved to human_review
+              // This prevents downgrading status when completion events arrive AFTER
+              // the task has finished, but allows updates while QA is still running
+              if (!isAlreadyInHumanReviewAndComplete) {
                 status = 'ai_review';
               }
             } else if (anyFailed) {
