@@ -29,6 +29,7 @@ from ui import (
     success,
     warning,
 )
+from workspace import get_existing_build_worktree
 
 from .utils import print_banner, validate_environment
 
@@ -91,6 +92,26 @@ def handle_qa_command(
     if not validate_environment(spec_dir):
         sys.exit(1)
 
+    # Check if there's an existing worktree for this spec
+    # If so, use the worktree as the working directory to ensure QA changes
+    # are made in the isolated worktree, not the main project (fixes #243-related issue)
+    spec_name = spec_dir.name
+    worktree_path = get_existing_build_worktree(project_dir, spec_name)
+
+    if worktree_path:
+        working_dir = worktree_path
+        # Update spec_dir to point to the spec inside the worktree
+        worktree_spec_dir = worktree_path / ".auto-claude" / "specs" / spec_name
+        if worktree_spec_dir.exists():
+            spec_dir = worktree_spec_dir
+            print(f"Using worktree: {worktree_path}")
+        else:
+            print(f"Warning: Worktree exists but spec dir not found at {worktree_spec_dir}")
+            print(f"Using main project spec dir: {spec_dir}")
+            working_dir = project_dir
+    else:
+        working_dir = project_dir
+
     # Check if there's pending human feedback that needs to be processed
     # Human feedback takes priority over "already approved" status
     fix_request_file = spec_dir / "QA_FIX_REQUEST.md"
@@ -111,7 +132,7 @@ def handle_qa_command(
     try:
         approved = asyncio.run(
             run_qa_validation_loop(
-                project_dir=project_dir,
+                project_dir=working_dir,
                 spec_dir=spec_dir,
                 model=model,
                 verbose=verbose,
@@ -124,4 +145,4 @@ def handle_qa_command(
             sys.exit(1)
     except KeyboardInterrupt:
         print("\n\nQA validation paused.")
-        print(f"Resume with: python auto-claude/run.py --spec {spec_dir.name} --qa")
+        print(f"Resume with: python auto-claude/run.py --spec {spec_name} --qa")

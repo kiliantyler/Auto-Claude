@@ -30,6 +30,7 @@ from ui import (
     success,
     warning,
 )
+from workspace import get_existing_build_worktree
 
 
 def collect_followup_task(spec_dir: Path, max_retries: int = 3) -> str | None:
@@ -239,6 +240,26 @@ def handle_followup_command(
     print_banner()
     print(f"\nFollow-up request for: {spec_dir.name}")
 
+    # Check if there's an existing worktree for this spec
+    # If so, use the worktree as the working directory to ensure follow-up changes
+    # are made in the isolated worktree, not the main project
+    spec_name = spec_dir.name
+    worktree_path = get_existing_build_worktree(project_dir, spec_name)
+
+    if worktree_path:
+        working_dir = worktree_path
+        # Update spec_dir to point to the spec inside the worktree
+        worktree_spec_dir = worktree_path / ".auto-claude" / "specs" / spec_name
+        if worktree_spec_dir.exists():
+            spec_dir = worktree_spec_dir
+            print(f"Using worktree: {worktree_path}")
+        else:
+            print(f"Warning: Worktree exists but spec dir not found at {worktree_spec_dir}")
+            print(f"Using main project spec dir: {spec_dir}")
+            working_dir = project_dir
+    else:
+        working_dir = project_dir
+
     # Check if implementation_plan.json exists
     plan_file = spec_dir / "implementation_plan.json"
     if not plan_file.exists():
@@ -331,7 +352,7 @@ def handle_followup_command(
     try:
         success_result = asyncio.run(
             run_followup_planner(
-                project_dir=project_dir,
+                project_dir=working_dir,
                 spec_dir=spec_dir,
                 model=model,
                 verbose=verbose,
