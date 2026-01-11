@@ -32,30 +32,19 @@ export class FileWatcher extends EventEmitter {
     await this.unwatch(taskId);
 
     const planPath = path.join(specDir, 'implementation_plan.json');
+    const mainPlanExists = existsSync(planPath);
 
-    // Check if main plan file exists
-    if (!existsSync(planPath)) {
-      this.emit('error', taskId, `Plan file not found: ${planPath}`);
+    // Check if worktree plan exists (this is where active builds write to)
+    const worktreePlanPath = worktreeSpecDir
+      ? path.join(worktreeSpecDir, 'implementation_plan.json')
+      : null;
+    const worktreePlanExists = worktreePlanPath && existsSync(worktreePlanPath);
+
+    // Need at least one plan file to watch
+    if (!mainPlanExists && !worktreePlanExists) {
+      this.emit('error', taskId, `Plan file not found in main or worktree`);
       return;
     }
-
-    // Create watcher with settings to handle frequent writes
-    const watcher = chokidar.watch(planPath, {
-      persistent: true,
-      ignoreInitial: true,
-      awaitWriteFinish: {
-        stabilityThreshold: 300,
-        pollInterval: 100
-      }
-    });
-
-    // Store watcher info
-    const watcherInfo: WatcherInfo = {
-      taskId,
-      watcher,
-      planPath
-    };
-    this.watchers.set(taskId, watcherInfo);
 
     // Helper to emit progress from a plan path
     const emitProgress = (pathToRead: string) => {
@@ -69,48 +58,73 @@ export class FileWatcher extends EventEmitter {
       }
     };
 
-    // Handle main file changes
-    watcher.on('change', () => emitProgress(planPath));
+    // Store watcher info - we'll add watchers as needed
+    const watcherInfo: WatcherInfo = {
+      taskId,
+      watcher: null as unknown as FSWatcher, // Will be set if main exists
+      planPath
+    };
+    this.watchers.set(taskId, watcherInfo);
 
-    // Handle errors
-    watcher.on('error', (error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.emit('error', taskId, message);
-    });
+    // Track whether we emitted from worktree to avoid overwriting with stale main data
+    let emittedFromWorktree = false;
 
-    // Also watch worktree directory if provided and different from main
-    if (worktreeSpecDir && worktreeSpecDir !== specDir) {
-      const worktreePlanPath = path.join(worktreeSpecDir, 'implementation_plan.json');
+    // Watch worktree FIRST if it exists (this is where real-time updates come from)
+    if (worktreePlanPath && worktreePlanExists && worktreeSpecDir !== specDir) {
+      const worktreeWatcher = chokidar.watch(worktreePlanPath, {
+        persistent: true,
+        ignoreInitial: true,
+        awaitWriteFinish: {
+          stabilityThreshold: 300,
+          pollInterval: 100
+        }
+      });
 
-      if (existsSync(worktreePlanPath)) {
-        const worktreeWatcher = chokidar.watch(worktreePlanPath, {
-          persistent: true,
-          ignoreInitial: true,
-          awaitWriteFinish: {
-            stabilityThreshold: 300,
-            pollInterval: 100
-          }
-        });
+      // Store worktree watcher info
+      watcherInfo.worktreeWatcher = worktreeWatcher;
+      watcherInfo.worktreePlanPath = worktreePlanPath;
 
-        // Store worktree watcher info
-        watcherInfo.worktreeWatcher = worktreeWatcher;
-        watcherInfo.worktreePlanPath = worktreePlanPath;
+      // Handle worktree file changes - this is where real-time updates come from
+      worktreeWatcher.on('change', () => emitProgress(worktreePlanPath));
 
-        // Handle worktree file changes - this is where real-time updates come from
-        worktreeWatcher.on('change', () => emitProgress(worktreePlanPath));
+      worktreeWatcher.on('error', (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.emit('error', taskId, `Worktree watcher error: ${message}`);
+      });
 
-        worktreeWatcher.on('error', (error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          this.emit('error', taskId, `Worktree watcher error: ${message}`);
-        });
-
-        // Read initial state from worktree (more current during active builds)
-        emitProgress(worktreePlanPath);
-      }
+      // Read initial state from worktree (more current during active builds)
+      emitProgress(worktreePlanPath);
+      emittedFromWorktree = true;
     }
 
-    // Read and emit initial state from main (fallback)
-    emitProgress(planPath);
+    // Watch main plan file if it exists
+    if (mainPlanExists) {
+      const watcher = chokidar.watch(planPath, {
+        persistent: true,
+        ignoreInitial: true,
+        awaitWriteFinish: {
+          stabilityThreshold: 300,
+          pollInterval: 100
+        }
+      });
+
+      watcherInfo.watcher = watcher;
+
+      // Handle main file changes
+      watcher.on('change', () => emitProgress(planPath));
+
+      // Handle errors
+      watcher.on('error', (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.emit('error', taskId, message);
+      });
+
+      // Read and emit initial state from main ONLY if we didn't already emit from worktree
+      // This prevents stale main data from overwriting current worktree data
+      if (!emittedFromWorktree) {
+        emitProgress(planPath);
+      }
+    }
   }
 
   /**
@@ -119,7 +133,10 @@ export class FileWatcher extends EventEmitter {
   async unwatch(taskId: string): Promise<void> {
     const watcherInfo = this.watchers.get(taskId);
     if (watcherInfo) {
-      await watcherInfo.watcher.close();
+      // Close main watcher if it exists
+      if (watcherInfo.watcher) {
+        await watcherInfo.watcher.close();
+      }
       // Also close worktree watcher if it exists
       if (watcherInfo.worktreeWatcher) {
         await watcherInfo.worktreeWatcher.close();
@@ -134,7 +151,10 @@ export class FileWatcher extends EventEmitter {
   async unwatchAll(): Promise<void> {
     const closePromises = Array.from(this.watchers.values()).map(
       async (info) => {
-        await info.watcher.close();
+        // Close main watcher if it exists
+        if (info.watcher) {
+          await info.watcher.close();
+        }
         // Also close worktree watcher if it exists
         if (info.worktreeWatcher) {
           await info.worktreeWatcher.close();
