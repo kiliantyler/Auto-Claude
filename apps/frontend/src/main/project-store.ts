@@ -440,15 +440,23 @@ export class ProjectStore {
         const { status, reviewReason } = this.determineTaskStatusAndReason(plan, specPath, metadata);
 
         // Extract subtasks from plan (handle both 'subtasks' and 'chunks' naming)
+        // Also handle schema variations: 'id' vs 'subtask_id', 'description' vs 'title'
         const subtasks = plan?.phases?.flatMap((phase) => {
           const items = phase.subtasks || (phase as { chunks?: PlanSubtask[] }).chunks || [];
-          return items.map((subtask) => ({
-            id: subtask.id,
-            title: subtask.description,
-            description: subtask.description,
-            status: subtask.status,
-            files: []
-          }));
+          return items.map((subtask) => {
+            // Handle both 'id' and 'subtask_id' field names
+            const subtaskAny = subtask as unknown as Record<string, unknown>;
+            const subtaskId = subtask.id || subtaskAny.subtask_id as string;
+            // Handle both 'description' and 'title' field names
+            const subtaskDesc = subtask.description || subtaskAny.title as string;
+            return {
+              id: subtaskId,
+              title: subtaskDesc,
+              description: subtaskDesc,
+              status: subtask.status,
+              files: []
+            };
+          });
         }) || [];
 
         // Extract staged status from plan (set when changes are merged with --no-commit)
