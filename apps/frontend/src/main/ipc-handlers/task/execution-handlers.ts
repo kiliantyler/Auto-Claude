@@ -148,7 +148,13 @@ export function registerTaskExecutionHandlers(
         specsBaseDir,
         task.specId
       );
-      fileWatcher.watch(taskId, specDir);
+
+      // Check if task uses a worktree - also watch that directory for real-time updates
+      const worktreePath = findTaskWorktree(project.path, task.specId);
+      const worktreeSpecDir = worktreePath
+        ? path.join(worktreePath, specsBaseDir, task.specId)
+        : undefined;
+      fileWatcher.watch(taskId, specDir, worktreeSpecDir);
 
       // Check if spec.md exists (indicates spec creation was already done or in progress)
       const specFilePath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -194,7 +200,8 @@ export function registerTaskExecutionHandlers(
             parallel: false,  // Sequential for planning phase
             workers: 1,
             baseBranch,
-            useWorktree: task.metadata?.useWorktree
+            useWorktree: task.metadata?.useWorktree,
+            useLocalBranch: project.settings?.useLocalBranch ?? true
           }
         );
       } else {
@@ -210,7 +217,8 @@ export function registerTaskExecutionHandlers(
             parallel: false,
             workers: 1,
             baseBranch,
-            useWorktree: task.metadata?.useWorktree
+            useWorktree: task.metadata?.useWorktree,
+            useLocalBranch: project.settings?.useLocalBranch ?? true
           }
         );
       }
@@ -286,15 +294,38 @@ export function registerTaskExecutionHandlers(
     if (task && project) {
       // Persist status to implementation_plan.json to prevent status flip-flop on refresh
       // Uses shared utility for consistency with agent-events-handlers.ts
+      // IMPORTANT: Must persist to BOTH main project AND worktree (if exists)
+      // because getTasks() prefers the worktree version
       // NOTE: This is now async and non-blocking for better UI responsiveness
-      const planPath = getPlanPath(project, task);
+      const mainPlanPath = getPlanPath(project, task);
+      const worktreePath = findTaskWorktree(project.path, task.specId);
+
       setImmediate(async () => {
         const persistStart = Date.now();
         try {
-          const persisted = await persistPlanStatus(planPath, 'backlog', project.id);
-          if (persisted) {
-            console.warn('[TASK_STOP] Updated plan status to backlog');
+          // Persist to main project
+          const mainPersisted = await persistPlanStatus(mainPlanPath, 'backlog', project.id);
+          if (mainPersisted) {
+            console.warn('[TASK_STOP] Updated main plan status to backlog');
           }
+
+          // Also persist to worktree if it exists (this is the one getTasks() actually reads!)
+          if (worktreePath) {
+            const specsBaseDir = getSpecsDir(project.autoBuildPath);
+            const worktreePlanPath = path.join(
+              worktreePath,
+              specsBaseDir,
+              task.specId,
+              AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN
+            );
+            if (existsSync(worktreePlanPath)) {
+              const worktreePersisted = await persistPlanStatus(worktreePlanPath, 'backlog', project.id);
+              if (worktreePersisted) {
+                console.warn('[TASK_STOP] Updated worktree plan status to backlog');
+              }
+            }
+          }
+
           if (DEBUG) {
             const delay = persistStart - ipcSentAt;
             const duration = Date.now() - persistStart;
@@ -562,7 +593,12 @@ export function registerTaskExecutionHandlers(
           console.warn('[TASK_UPDATE_STATUS] Auto-starting task:', taskId);
 
           // Start file watcher for this task
-          fileWatcher.watch(taskId, specDir);
+          // Also watch worktree directory for real-time updates
+          const worktreePathForUpdate = findTaskWorktree(project.path, task.specId);
+          const worktreeSpecDirForUpdate = worktreePathForUpdate
+            ? path.join(worktreePathForUpdate, specsBaseDir, task.specId)
+            : undefined;
+          fileWatcher.watch(taskId, specDir, worktreeSpecDirForUpdate);
 
           // Check if spec.md exists
           const specFilePath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -591,7 +627,8 @@ export function registerTaskExecutionHandlers(
                 parallel: false,
                 workers: 1,
                 baseBranch: baseBranchForUpdate,
-                useWorktree: task.metadata?.useWorktree
+                useWorktree: task.metadata?.useWorktree,
+                useLocalBranch: project.settings?.useLocalBranch ?? true
               }
             );
           } else {
@@ -606,7 +643,8 @@ export function registerTaskExecutionHandlers(
                 parallel: false,
                 workers: 1,
                 baseBranch: baseBranchForUpdate,
-                useWorktree: task.metadata?.useWorktree
+                useWorktree: task.metadata?.useWorktree,
+                useLocalBranch: project.settings?.useLocalBranch ?? true
               }
             );
           }
@@ -804,10 +842,13 @@ export function registerTaskExecutionHandlers(
 
           // Task is not complete - reset only stuck subtasks for retry
           // Keep completed subtasks as-is so run.py can resume from where it left off
+          const resetSubtaskIds: string[] = [];
+          console.log(`[Recovery] Scanning subtasks in plan...`);
           if (plan.phases && Array.isArray(plan.phases)) {
-            for (const phase of plan.phases as Array<{ subtasks?: Array<{ status: string; actual_output?: string; started_at?: string; completed_at?: string }> }>) {
+            for (const phase of plan.phases as Array<{ subtasks?: Array<{ id?: string; status: string; actual_output?: string; started_at?: string; completed_at?: string }> }>) {
               if (phase.subtasks && Array.isArray(phase.subtasks)) {
                 for (const subtask of phase.subtasks) {
+                  console.log(`[Recovery] Subtask ${subtask.id}: status=${subtask.status}`);
                   // Reset in_progress subtasks to pending (they were interrupted)
                   // Keep completed subtasks as-is so run.py can resume
                   if (subtask.status === 'in_progress') {
@@ -817,7 +858,8 @@ export function registerTaskExecutionHandlers(
                     delete subtask.actual_output;
                     delete subtask.started_at;
                     delete subtask.completed_at;
-                    console.log(`[Recovery] Reset stuck subtask: ${originalStatus} -> pending`);
+                    if (subtask.id) resetSubtaskIds.push(subtask.id);
+                    console.log(`[Recovery] Reset subtask ${subtask.id}: ${originalStatus} -> pending`);
                   }
                   // Also reset failed subtasks so they can be retried
                   if (subtask.status === 'failed') {
@@ -826,9 +868,81 @@ export function registerTaskExecutionHandlers(
                     delete subtask.actual_output;
                     delete subtask.started_at;
                     delete subtask.completed_at;
-                    console.log(`[Recovery] Reset failed subtask for retry`);
+                    if (subtask.id) resetSubtaskIds.push(subtask.id);
+                    console.log(`[Recovery] Reset subtask ${subtask.id}: failed -> pending`);
                   }
                 }
+              }
+            }
+          }
+
+          // Also clear attempt history for reset subtasks so they can be retried fresh
+          // Without this, the agent would immediately re-mark them as stuck due to high attempt count
+          console.log(`[Recovery] Subtasks reset: ${resetSubtaskIds.length}`, resetSubtaskIds);
+          if (resetSubtaskIds.length > 0) {
+            // Clear attempt history in ALL locations (specDir, mainSpecDir, worktreeSpecDir)
+            const attemptHistoryPaths: string[] = [];
+
+            // Always add specDir
+            attemptHistoryPaths.push(path.join(specDir, 'memory', 'attempt_history.json'));
+
+            // Add mainSpecDir if different
+            if (mainSpecDir !== specDir) {
+              attemptHistoryPaths.push(path.join(mainSpecDir, 'memory', 'attempt_history.json'));
+            }
+
+            // Add worktreeSpecDir if different from both
+            if (worktreeSpecDir && worktreeSpecDir !== specDir && worktreeSpecDir !== mainSpecDir) {
+              attemptHistoryPaths.push(path.join(worktreeSpecDir, 'memory', 'attempt_history.json'));
+            }
+
+            console.log(`[Recovery] Will clear attempt history at ${attemptHistoryPaths.length} location(s):`, attemptHistoryPaths);
+
+            for (const attemptHistoryPath of attemptHistoryPaths) {
+              try {
+                console.log(`[Recovery] Checking attempt history at: ${attemptHistoryPath}`);
+                if (existsSync(attemptHistoryPath)) {
+                  console.log(`[Recovery] File exists, reading...`);
+                  const historyContent = safeReadFileSync(attemptHistoryPath);
+                  if (historyContent) {
+                    const history = JSON.parse(historyContent);
+                    console.log(`[Recovery] Current stuck_subtasks:`, history.stuck_subtasks);
+                    console.log(`[Recovery] Current subtasks in history:`, Object.keys(history.subtasks || {}));
+
+                    // Reset attempt history for each subtask
+                    for (const subtaskId of resetSubtaskIds) {
+                      if (history.subtasks && history.subtasks[subtaskId]) {
+                        const oldAttempts = history.subtasks[subtaskId].attempts?.length || 0;
+                        history.subtasks[subtaskId] = { attempts: [], status: 'pending' };
+                        console.log(`[Recovery] Cleared attempt history for ${subtaskId} (had ${oldAttempts} attempts)`);
+                      } else {
+                        console.log(`[Recovery] No attempt history found for ${subtaskId}`);
+                      }
+                    }
+
+                    // Remove reset subtasks from stuck_subtasks list
+                    if (history.stuck_subtasks && Array.isArray(history.stuck_subtasks)) {
+                      const beforeCount = history.stuck_subtasks.length;
+                      history.stuck_subtasks = history.stuck_subtasks.filter(
+                        (s: { subtask_id?: string }) => !resetSubtaskIds.includes(s.subtask_id || '')
+                      );
+                      console.log(`[Recovery] Removed ${beforeCount - history.stuck_subtasks.length} from stuck_subtasks list`);
+                    }
+
+                    history.metadata = history.metadata || {};
+                    history.metadata.last_updated = new Date().toISOString();
+
+                    atomicWriteFileSync(attemptHistoryPath, JSON.stringify(history, null, 2));
+                    console.log(`[Recovery] Successfully wrote updated attempt_history.json`);
+                  } else {
+                    console.log(`[Recovery] File exists but is empty`);
+                  }
+                } else {
+                  console.log(`[Recovery] File does not exist at: ${attemptHistoryPath}`);
+                }
+              } catch (historyError) {
+                // Log but don't fail - this is a best-effort optimization
+                console.error(`[Recovery] ERROR clearing attempt history at ${attemptHistoryPath}:`, historyError);
               }
             }
           }
@@ -918,7 +1032,12 @@ export function registerTaskExecutionHandlers(
             // Start file watcher for this task
             const specsBaseDir = getSpecsDir(project.autoBuildPath);
             const specDirForWatcher = path.join(project.path, specsBaseDir, task.specId);
-            fileWatcher.watch(taskId, specDirForWatcher);
+            // Also watch worktree directory for real-time updates
+            const worktreePathForRecovery = findTaskWorktree(project.path, task.specId);
+            const worktreeSpecDirForRecovery = worktreePathForRecovery
+              ? path.join(worktreePathForRecovery, specsBaseDir, task.specId)
+              : undefined;
+            fileWatcher.watch(taskId, specDirForWatcher, worktreeSpecDirForRecovery);
 
             // Check if spec.md exists to determine whether to run spec creation or task execution
             const specFilePath = path.join(specDirForWatcher, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -944,7 +1063,8 @@ export function registerTaskExecutionHandlers(
                   parallel: false,
                   workers: 1,
                   baseBranch: baseBranchForRecovery,
-                  useWorktree: task.metadata?.useWorktree
+                  useWorktree: task.metadata?.useWorktree,
+                  useLocalBranch: project.settings?.useLocalBranch ?? true
                 }
               );
             }

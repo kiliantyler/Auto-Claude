@@ -3,10 +3,14 @@ import { IPC_CHANNELS, AUTO_BUILD_PATHS, getSpecsDir } from '../../../shared/con
 import type { IPCResult, Task, TaskMetadata } from '../../../shared/types';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { projectStore } from '../../project-store';
 import { titleGenerator } from '../../title-generator';
 import { AgentManager } from '../../agent';
 import { findTaskAndProject } from './shared';
+import { fileWatcher } from '../../file-watcher';
+import { findTaskWorktree } from '../../worktree-paths';
+import { getToolPath } from '../../cli-tool-manager';
 
 /**
  * Register task CRUD (Create, Read, Update, Delete) handlers
@@ -21,6 +25,30 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
       console.warn('[IPC] TASK_LIST called with projectId:', projectId);
       const tasks = projectStore.getTasks(projectId);
       console.warn('[IPC] TASK_LIST returning', tasks.length, 'tasks');
+
+      // Start file watchers for in-progress tasks so progress updates flow to the UI
+      // This handles the case where the app is restarted while a task is running
+      const project = projectStore.getProject(projectId);
+      if (project) {
+        const specsBaseDir = getSpecsDir(project.autoBuildPath);
+
+        for (const task of tasks) {
+          // Start watcher for tasks that are actively being worked on
+          if ((task.status === 'in_progress' || task.status === 'ai_review') && !fileWatcher.isWatching(task.id)) {
+            const specDir = path.join(project.path, specsBaseDir, task.specId);
+
+            // Check for worktree path (where actual changes happen during builds)
+            const worktreePath = findTaskWorktree(project.path, task.specId);
+            const worktreeSpecDir = worktreePath
+              ? path.join(worktreePath, specsBaseDir, task.specId)
+              : undefined;
+
+            console.warn(`[TASK_LIST] Starting file watcher for in-progress task: ${task.id}`);
+            fileWatcher.watch(task.id, specDir, worktreeSpecDir);
+          }
+        }
+      }
+
       return { success: true, data: tasks };
     }
   );
@@ -203,6 +231,11 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
 
   /**
    * Delete a task
+   * This fully cleans up all task-related resources:
+   * - Stops the file watcher
+   * - Removes the worktree (if exists)
+   * - Deletes the associated git branch
+   * - Deletes spec directories in both main project and worktree
    */
   ipcMain.handle(
     IPC_CHANNELS.TASK_DELETE,
@@ -222,24 +255,149 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
         return { success: false, error: 'Cannot delete a running task. Stop the task first.' };
       }
 
-      // Delete the spec directory - use task.specsPath if available (handles worktree tasks)
-      const specDir = task.specsPath || path.join(project.path, getSpecsDir(project.autoBuildPath), task.specId);
-
       try {
-        console.warn(`[TASK_DELETE] Attempting to delete: ${specDir} (location: ${task.location || 'unknown'})`);
-        if (existsSync(specDir)) {
-          await rm(specDir, { recursive: true, force: true });
-          console.warn(`[TASK_DELETE] Deleted spec directory: ${specDir}`);
-        } else {
-          console.warn(`[TASK_DELETE] Spec directory not found: ${specDir}`);
+        // 1. Stop file watcher for this task
+        if (fileWatcher.isWatching(taskId)) {
+          console.warn(`[TASK_DELETE] Stopping file watcher for task: ${taskId}`);
+          await fileWatcher.unwatch(taskId);
         }
 
-        // Invalidate cache since a task was deleted
+        // 2. Find and remove worktree if it exists
+        // First try the standard path lookup
+        let worktreePath = findTaskWorktree(project.path, task.specId);
+        let branchName: string | null = null;
+
+        // If not found by path, search git worktree list for matching branch
+        if (!worktreePath) {
+          console.warn(`[TASK_DELETE] No worktree found by path for specId: ${task.specId}, checking git worktree list...`);
+          try {
+            const worktreeList = execFileSync(getToolPath('git'), ['worktree', 'list', '--porcelain'], {
+              cwd: project.path,
+              encoding: 'utf-8'
+            });
+
+            // Parse worktree list to find one matching this task's spec
+            // Format: worktree /path\nHEAD abc123\nbranch refs/heads/auto-claude/spec-name\n\n
+            const entries = worktreeList.split('\n\n').filter(Boolean);
+            for (const entry of entries) {
+              const lines = entry.split('\n');
+              const worktreeLine = lines.find(l => l.startsWith('worktree '));
+              const branchLine = lines.find(l => l.startsWith('branch '));
+
+              if (branchLine && branchLine.includes(task.specId)) {
+                worktreePath = worktreeLine?.replace('worktree ', '') || null;
+                branchName = branchLine.replace('branch refs/heads/', '');
+                console.warn(`[TASK_DELETE] Found worktree via git list: ${worktreePath}, branch: ${branchName}`);
+                break;
+              }
+            }
+          } catch (listError) {
+            console.warn(`[TASK_DELETE] Failed to list worktrees: ${listError}`);
+          }
+        }
+
+        if (worktreePath) {
+          console.warn(`[TASK_DELETE] Found worktree at: ${worktreePath}`);
+
+          try {
+            // Get the branch name before removing worktree (if not already found)
+            if (!branchName) {
+              try {
+                branchName = execFileSync(getToolPath('git'), ['rev-parse', '--abbrev-ref', 'HEAD'], {
+                  cwd: worktreePath,
+                  encoding: 'utf-8'
+                }).trim();
+                console.warn(`[TASK_DELETE] Detected branch: ${branchName}`);
+              } catch (branchError) {
+                console.warn(`[TASK_DELETE] Branch detection failed: ${branchError}`);
+              }
+            }
+
+            // Remove the worktree using git
+            console.warn(`[TASK_DELETE] Running: git worktree remove --force "${worktreePath}"`);
+            execFileSync(getToolPath('git'), ['worktree', 'remove', '--force', worktreePath], {
+              cwd: project.path,
+              encoding: 'utf-8'
+            });
+            console.warn(`[TASK_DELETE] Removed git worktree: ${worktreePath}`);
+
+            // Delete the branch if we found one
+            if (branchName && branchName !== 'HEAD' && !branchName.includes('(HEAD detached')) {
+              try {
+                console.warn(`[TASK_DELETE] Running: git branch -D "${branchName}"`);
+                execFileSync(getToolPath('git'), ['branch', '-D', branchName], {
+                  cwd: project.path,
+                  encoding: 'utf-8'
+                });
+                console.warn(`[TASK_DELETE] Deleted branch: ${branchName}`);
+              } catch (branchDeleteError) {
+                // Branch might already be deleted or protected
+                console.warn(`[TASK_DELETE] Could not delete branch "${branchName}": ${branchDeleteError}`);
+              }
+            }
+          } catch (gitError) {
+            // If git worktree remove fails, try to delete the directory manually
+            console.error(`[TASK_DELETE] Git worktree remove failed: ${gitError}`);
+            try {
+              await rm(worktreePath, { recursive: true, force: true });
+              console.warn(`[TASK_DELETE] Manually deleted worktree directory: ${worktreePath}`);
+
+              // Also try to prune worktrees after manual delete
+              try {
+                execFileSync(getToolPath('git'), ['worktree', 'prune'], {
+                  cwd: project.path,
+                  encoding: 'utf-8'
+                });
+                console.warn(`[TASK_DELETE] Pruned stale worktrees`);
+              } catch {
+                // Prune failure is not critical
+              }
+            } catch (rmError) {
+              console.error(`[TASK_DELETE] Failed to manually delete worktree: ${rmError}`);
+            }
+          }
+        } else {
+          console.warn(`[TASK_DELETE] No worktree found for task: ${task.specId}`);
+        }
+
+        // 3. Also try to delete any orphaned branch matching auto-claude/{specId}
+        if (!branchName) {
+          const expectedBranchName = `auto-claude/${task.specId}`;
+          try {
+            execFileSync(getToolPath('git'), ['branch', '-D', expectedBranchName], {
+              cwd: project.path,
+              encoding: 'utf-8'
+            });
+            console.warn(`[TASK_DELETE] Deleted orphaned branch: ${expectedBranchName}`);
+          } catch {
+            // Branch doesn't exist, that's fine
+          }
+        }
+
+        // 4. Delete the spec directory in the main project
+        const specsBaseDir = getSpecsDir(project.autoBuildPath);
+        const mainSpecDir = path.join(project.path, specsBaseDir, task.specId);
+
+        console.warn(`[TASK_DELETE] Attempting to delete main spec dir: ${mainSpecDir}`);
+        if (existsSync(mainSpecDir)) {
+          await rm(mainSpecDir, { recursive: true, force: true });
+          console.warn(`[TASK_DELETE] Deleted main spec directory: ${mainSpecDir}`);
+        } else {
+          console.warn(`[TASK_DELETE] Main spec directory not found: ${mainSpecDir}`);
+        }
+
+        // 5. Also try to delete using task.specsPath if different (handles edge cases)
+        if (task.specsPath && task.specsPath !== mainSpecDir && existsSync(task.specsPath)) {
+          await rm(task.specsPath, { recursive: true, force: true });
+          console.warn(`[TASK_DELETE] Deleted additional spec path: ${task.specsPath}`);
+        }
+
+        // 6. Invalidate cache since a task was deleted
         projectStore.invalidateTasksCache(project.id);
 
         return { success: true };
       } catch (error) {
-        console.error('[TASK_DELETE] Error deleting spec directory:', error);
+        console.error('[TASK_DELETE] Error deleting task:', error);
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to delete task files'
