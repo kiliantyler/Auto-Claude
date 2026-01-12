@@ -262,11 +262,12 @@ export function registerTaskExecutionHandlers(
         }
 
         // Dual-write: Update status in SQLite database
+        // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
           const storage = getTaskStorage();
-          storage.updateTask(taskId, { status: 'in_progress' });
+          storage.updateTask(task.id, { status: 'in_progress' });
           if (DEBUG) {
-            console.log(`[TASK_START] Updated task status in database: in_progress`);
+            console.log(`[TASK_START] Updated task status in database: ${task.id} -> in_progress`);
           }
         } catch (dbErr) {
           console.error('[TASK_START] Failed to update task status in database:', dbErr);
@@ -433,11 +434,12 @@ export function registerTaskExecutionHandlers(
             }
 
             // Dual-write: Update status in SQLite database
+            // Use task.id (the actual database ID) not taskId (which might be specId)
             try {
               const storage = getTaskStorage();
-              storage.updateTask(taskId, { status: 'backlog' });
+              storage.updateTask(task.id, { status: 'backlog' });
               if (DEBUG) {
-                console.log(`[TASK_STOP] Updated task status in database: backlog`);
+                console.log(`[TASK_STOP] Updated task status in database: ${task.id} -> backlog`);
               }
             } catch (dbErr) {
               console.error('[TASK_STOP] Failed to update task status in database:', dbErr);
@@ -585,11 +587,12 @@ export function registerTaskExecutionHandlers(
       }
 
       // Dual-write: Update status in SQLite database
+      // Use task.id (the actual database ID) not taskId (which might be specId)
       try {
         const storage = getTaskStorage();
-        storage.updateTask(taskId, { status: 'backlog' });
+        storage.updateTask(task.id, { status: 'backlog' });
         if (DEBUG) {
-          console.log(`[TASK_RESET] Updated task status in database: backlog`);
+          console.log(`[TASK_RESET] Updated task status in database: ${task.id} -> backlog`);
         }
       } catch (dbErr) {
         console.error('[TASK_RESET] Failed to update task status in database:', dbErr);
@@ -673,10 +676,11 @@ export function registerTaskExecutionHandlers(
         }
 
         // Dual-write: Update status in SQLite database
+        // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
           const storage = getTaskStorage();
-          storage.updateTask(taskId, { status: 'done' });
-          console.debug(`[TASK_REVIEW] Updated task status in database: done`);
+          storage.updateTask(task.id, { status: 'done' });
+          console.debug(`[TASK_REVIEW] Updated task status in database: ${task.id} -> done`);
         } catch (dbErr) {
           console.error('[TASK_REVIEW] Failed to update task status in database:', dbErr);
         }
@@ -752,10 +756,11 @@ export function registerTaskExecutionHandlers(
         }
 
         // Dual-write: Update status in SQLite database
+        // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
           const storage = getTaskStorage();
-          storage.updateTask(taskId, { status: 'in_progress' });
-          console.debug(`[TASK_REVIEW] Updated task status in database: in_progress`);
+          storage.updateTask(task.id, { status: 'in_progress' });
+          console.debug(`[TASK_REVIEW] Updated task status in database: ${task.id} -> in_progress`);
         } catch (dbErr) {
           console.error('[TASK_REVIEW] Failed to update task status in database:', dbErr);
         }
@@ -957,10 +962,11 @@ export function registerTaskExecutionHandlers(
         }
 
         // Dual-write: Update status in SQLite database
+        // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
           const storage = getTaskStorage();
-          storage.updateTask(taskId, { status });
-          console.debug(`[TASK_UPDATE_STATUS] Updated task status in database: ${status}`);
+          storage.updateTask(task.id, { status });
+          console.debug(`[TASK_UPDATE_STATUS] Updated task status in database: ${task.id} -> ${status}`);
         } catch (dbErr) {
           console.error('[TASK_UPDATE_STATUS] Failed to update task status in database:', dbErr);
         }
@@ -1390,10 +1396,11 @@ export function registerTaskExecutionHandlers(
         }
 
         // Dual-write: Update status in SQLite database
+        // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
           const storage = getTaskStorage();
-          storage.updateTask(taskId, { status: newStatus });
-          console.debug(`[TASK_RECOVER_STUCK] Updated task status in database: ${newStatus}`);
+          storage.updateTask(task.id, { status: newStatus });
+          console.debug(`[TASK_RECOVER_STUCK] Updated task status in database: ${task.id} -> ${newStatus}`);
         } catch (dbErr) {
           console.error('[TASK_RECOVER_STUCK] Failed to update task status in database:', dbErr);
         }

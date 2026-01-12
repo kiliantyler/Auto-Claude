@@ -914,8 +914,17 @@ export class MigrationWorker {
       }
     }
 
-    // Read status from implementation_plan.json if available
+    // Read status and subtasks from implementation_plan.json if available
     let status = 'backlog';
+    let subtasks: Array<{
+      id: string;
+      title: string;
+      description: string;
+      status: string;
+      files: string[];
+      verification?: unknown;
+    }> = [];
+
     const planPath = path.join(specsDir, 'implementation_plan.json');
     if (existsSync(planPath)) {
       try {
@@ -924,6 +933,24 @@ export class MigrationWorker {
         if (plan.status) {
           // Normalize legacy status values to valid TaskStatus
           status = this.normalizeTaskStatus(plan.status);
+        }
+
+        // Extract subtasks from phases array
+        if (plan.phases && Array.isArray(plan.phases)) {
+          subtasks = plan.phases.flatMap((phase: Record<string, unknown>) => {
+            const phaseSubtasks = phase.subtasks as Array<Record<string, unknown>> | undefined;
+            if (!phaseSubtasks || !Array.isArray(phaseSubtasks)) {
+              return [];
+            }
+            return phaseSubtasks.map((subtask) => ({
+              id: (subtask.id as string) || `subtask-${Math.random().toString(36).substr(2, 9)}`,
+              title: (subtask.description as string) || '',
+              description: (subtask.description as string) || '',
+              status: this.normalizeSubtaskStatus((subtask.status as string) || 'pending'),
+              files: [],
+              verification: subtask.verification
+            }));
+          });
         }
       } catch {
         // Use default status
@@ -943,8 +970,15 @@ export class MigrationWorker {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    // Serialize metadata
-    const metadataJson = JSON.stringify(metadata);
+    // Serialize metadata with subtasks and other fields
+    // This matches the format expected by TaskStorage.rowToTask()
+    const metadataJson = JSON.stringify({
+      ...metadata,
+      subtasks,
+      qaReport: undefined,
+      logs: [],
+      executionProgress: undefined
+    });
 
     // Insert task (OR IGNORE ensures idempotency)
     insertStmt.run(
@@ -1100,6 +1134,46 @@ export class MigrationWorker {
     // Unknown status - default to backlog and log warning
     console.warn(`[MigrationWorker] Unknown status "${status}", defaulting to "backlog"`);
     return 'backlog';
+  }
+
+  /**
+   * Normalize subtask status values to valid SubtaskStatus
+   * Valid values: 'pending' | 'in_progress' | 'completed' | 'failed'
+   */
+  private normalizeSubtaskStatus(status: string): string {
+    const normalized = status.toLowerCase().trim();
+
+    const statusMap: Record<string, string> = {
+      // Valid statuses (pass through)
+      'pending': 'pending',
+      'in_progress': 'in_progress',
+      'completed': 'completed',
+      'failed': 'failed',
+
+      // Legacy → pending
+      'todo': 'pending',
+      'planned': 'pending',
+      'not_started': 'pending',
+
+      // Legacy → in_progress
+      'running': 'in_progress',
+      'active': 'in_progress',
+      'started': 'in_progress',
+      'working': 'in_progress',
+
+      // Legacy → completed
+      'done': 'completed',
+      'finished': 'completed',
+      'success': 'completed',
+      'passed': 'completed',
+
+      // Legacy → failed
+      'error': 'failed',
+      'blocked': 'failed',
+      'rejected': 'failed',
+    };
+
+    return statusMap[normalized] || 'pending';
   }
 
   // ============================================

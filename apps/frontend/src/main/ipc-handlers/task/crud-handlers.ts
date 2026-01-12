@@ -401,10 +401,11 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
         }
 
         // 6. DUAL-WRITE: Delete from SQLite database (Phase 1 migration)
+        // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
           const taskStorage = getTaskStorage();
-          taskStorage.deleteTask(taskId);
-          console.warn(`[TASK_DELETE] Deleted from SQLite database: ${taskId}`);
+          taskStorage.deleteTask(task.id);
+          console.warn(`[TASK_DELETE] Deleted from SQLite database: ${task.id}`);
         } catch (dbError) {
           console.error('[TASK_DELETE] Failed to delete from SQLite (continuing):', dbError);
           // Continue - JSON files are already deleted
@@ -613,14 +614,15 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
         };
 
         // Write to SQLite database (primary storage)
+        // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
           const taskStorage = getTaskStorage();
-          taskStorage.updateTask(taskId, {
+          taskStorage.updateTask(task.id, {
             title: finalTitle,
             description: updates.description,
             metadata: updatedMetadata
           });
-          console.warn(`[TASK_UPDATE] Updated in SQLite database: ${taskId}`);
+          console.warn(`[TASK_UPDATE] Updated in SQLite database: ${task.id}`);
         } catch (dbError) {
           console.error('[TASK_UPDATE] Failed to update in SQLite:', dbError);
           // If dual-write is enabled, JSON files are already updated as backup
