@@ -681,12 +681,14 @@ export class AgentQueueManager {
       progressPhase = progressUpdate.phase;
       progressPercent = progressUpdate.progress;
 
-      // Emit progress update
-      this.emitter.emit('roadmap-progress', projectId, {
+      // Store and emit progress update
+      const progressData = {
         phase: progressPhase,
         progress: progressPercent,
         message: log.trim().substring(0, 200) // Truncate long messages
-      });
+      };
+      this.state.updateProgress(projectId, progressData);
+      this.emitter.emit('roadmap-progress', projectId, progressData);
     });
 
     // Handle stderr - explicitly decode as UTF-8
@@ -696,11 +698,13 @@ export class AgentQueueManager {
       allRoadmapOutput = (allRoadmapOutput + log).slice(-10000);
       console.error('[Roadmap STDERR]', log);
       emitLogs(log);
-      this.emitter.emit('roadmap-progress', projectId, {
+      const progressData = {
         phase: progressPhase,
         progress: progressPercent,
         message: log.trim().substring(0, 200)
-      });
+      };
+      this.state.updateProgress(projectId, progressData);
+      this.emitter.emit('roadmap-progress', projectId, progressData);
     });
 
     // Handle process exit
@@ -850,10 +854,21 @@ export class AgentQueueManager {
   }
 
   /**
-   * Check if roadmap is running for a project
+   * Check if roadmap is running for a project and return current progress
+   */
+  getRoadmapStatus(projectId: string): { isRunning: boolean; progress?: { phase: string; progress: number; message: string } } {
+    const processInfo = this.state.getProcess(projectId);
+    const isRunning = processInfo?.queueProcessType === 'roadmap';
+    return {
+      isRunning,
+      progress: isRunning ? processInfo?.currentProgress : undefined
+    };
+  }
+
+  /**
+   * Check if roadmap is running for a project (legacy method for compatibility)
    */
   isRoadmapRunning(projectId: string): boolean {
-    const processInfo = this.state.getProcess(projectId);
-    return processInfo?.queueProcessType === 'roadmap';
+    return this.getRoadmapStatus(projectId).isRunning;
   }
 }

@@ -312,7 +312,7 @@ export interface ElectronAPI {
 
   // Roadmap operations
   getRoadmap: (projectId: string) => Promise<IPCResult<Roadmap | null>>;
-  getRoadmapStatus: (projectId: string) => Promise<IPCResult<{ isRunning: boolean }>>;
+  getRoadmapStatus: (projectId: string) => Promise<IPCResult<{ isRunning: boolean; progress?: { phase: string; progress: number; message: string } }>>;
   saveRoadmap: (projectId: string, roadmap: Roadmap) => Promise<IPCResult>;
   generateRoadmap: (projectId: string, enableCompetitorAnalysis?: boolean, refreshCompetitorAnalysis?: boolean) => void;
   refreshRoadmap: (projectId: string, enableCompetitorAnalysis?: boolean, refreshCompetitorAnalysis?: boolean) => void;

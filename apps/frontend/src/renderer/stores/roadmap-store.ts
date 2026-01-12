@@ -253,12 +253,17 @@ export async function loadRoadmap(projectId: string): Promise<void> {
   // This restores the generation status when switching back to a project
   const statusResult = await window.electronAPI.getRoadmapStatus(projectId);
   if (statusResult.success && statusResult.data?.isRunning) {
-    // Generation is running - restore the UI state to show progress
-    // The actual progress will be updated by incoming events
+    // Generation is running - restore the UI state with current progress
+    const progress = statusResult.data.progress;
+    // Map backend phase to valid RoadmapGenerationStatus phase
+    const validPhases = ['idle', 'analyzing', 'discovering', 'generating', 'complete', 'error'] as const;
+    const phase = progress?.phase && validPhases.includes(progress.phase as typeof validPhases[number])
+      ? progress.phase as typeof validPhases[number]
+      : 'analyzing';
     store.setGenerationStatus({
-      phase: 'analyzing',
-      progress: 0,
-      message: 'Roadmap generation in progress...'
+      phase,
+      progress: progress?.progress || 0,
+      message: progress?.message || 'Roadmap generation in progress...'
     });
   } else {
     // Generation is not running - reset to idle

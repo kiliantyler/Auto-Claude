@@ -79,6 +79,16 @@ export class AgentState {
   }
 
   /**
+   * Update progress for a process (used for roadmap/ideation to restore UI state)
+   */
+  updateProgress(taskId: string, progress: { phase: string; progress: number; message: string }): void {
+    const process = this.processes.get(taskId);
+    if (process) {
+      process.currentProgress = progress;
+    }
+  }
+
+  /**
    * Clear all state (for testing or cleanup)
    */
   clear(): void {

@@ -324,6 +324,13 @@ export class AgentManager extends EventEmitter {
   }
 
   /**
+   * Get roadmap status including current progress
+   */
+  getRoadmapStatus(projectId: string): { isRunning: boolean; progress?: { phase: string; progress: number; message: string } } {
+    return this.queueManager.getRoadmapStatus(projectId);
+  }
+
+  /**
    * Kill all running processes
    */
   async killAll(): Promise<void> {
