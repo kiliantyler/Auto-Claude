@@ -13,6 +13,10 @@ import { DebugAPI, createDebugAPI } from './modules/debug-api';
 import { ClaudeCodeAPI, createClaudeCodeAPI } from './modules/claude-code-api';
 import { McpAPI, createMcpAPI } from './modules/mcp-api';
 import { ProfileAPI, createProfileAPI } from './profile-api';
+import { HistoryAPI, createHistoryAPI } from './modules/history-api';
+import { SearchAPI, createSearchAPI } from './modules/search-api';
+import { UndoAPI, createUndoAPI } from './modules/undo-api';
+import { AnalyticsAPI, createAnalyticsAPI } from './modules/analytics-api';
 
 export interface ElectronAPI extends
   ProjectAPI,
@@ -28,7 +32,11 @@ export interface ElectronAPI extends
   DebugAPI,
   ClaudeCodeAPI,
   McpAPI,
-  ProfileAPI {
+  ProfileAPI,
+  HistoryAPI,
+  SearchAPI,
+  UndoAPI,
+  AnalyticsAPI {
   github: GitHubAPI;
 }
 
@@ -47,6 +55,10 @@ export const createElectronAPI = (): ElectronAPI => ({
   ...createClaudeCodeAPI(),
   ...createMcpAPI(),
   ...createProfileAPI(),
+  ...createHistoryAPI(),
+  ...createSearchAPI(),
+  ...createUndoAPI(),
+  ...createAnalyticsAPI(),
   github: createGitHubAPI()
 });
 
@@ -66,7 +78,11 @@ export {
   createGitLabAPI,
   createDebugAPI,
   createClaudeCodeAPI,
-  createMcpAPI
+  createMcpAPI,
+  createHistoryAPI,
+  createSearchAPI,
+  createUndoAPI,
+  createAnalyticsAPI
 };
 
 export type {
@@ -84,5 +100,9 @@ export type {
   GitLabAPI,
   DebugAPI,
   ClaudeCodeAPI,
-  McpAPI
+  McpAPI,
+  HistoryAPI,
+  SearchAPI,
+  UndoAPI,
+  AnalyticsAPI
 };
