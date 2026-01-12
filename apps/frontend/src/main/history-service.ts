@@ -16,14 +16,14 @@
  * ```typescript
  * const service = getHistoryService();
  *
- * // Get history for a task
- * const history = service.getTaskHistory('task-123');
+ * // Get history for a task (requires project path)
+ * const history = service.getTaskHistory('/path/to/project', 'task-123');
  *
  * // Get recent changes
- * const recent = service.getRecentChanges(50);
+ * const recent = service.getRecentChanges('/path/to/project', 50);
  *
  * // Get changes grouped by session
- * const sessionChanges = service.getSessionChanges('session-456');
+ * const sessionChanges = service.getSessionChanges('/path/to/project', 'session-456');
  * ```
  */
 
@@ -37,11 +37,11 @@ import type {
   SessionHistoryGroup,
   RecentActivityItem,
 } from '../shared/types';
-import { getDatabaseConnection } from './database';
+import { getProjectDatabase } from './database';
 
 /**
  * History Service
- * Handles task history query operations from SQLite database
+ * Handles task history query operations from project-local SQLite database
  */
 export class HistoryService {
   private readonly ENABLE_TASK_HISTORY: boolean;
@@ -65,17 +65,27 @@ export class HistoryService {
   /**
    * Get the full history for a specific task
    *
+   * @param projectPath - Path to the project
    * @param taskId - Task ID to get history for
    * @param options - Optional query options (limit, offset)
    * @returns HistoryQueryResult with entries and pagination info
    */
-  getTaskHistory(taskId: string, options?: { limit?: number; offset?: number }): HistoryQueryResult {
+  getTaskHistory(
+    projectPath: string,
+    taskId: string,
+    options?: { limit?: number; offset?: number }
+  ): HistoryQueryResult {
     if (!this.ENABLE_TASK_HISTORY) {
       return { entries: [], total: 0, hasMore: false };
     }
 
+    if (!projectPath) {
+      console.warn('[HistoryService] getTaskHistory called without projectPath');
+      return { entries: [], total: 0, hasMore: false };
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const limit = options?.limit ?? 50;
       const offset = options?.offset ?? 0;
@@ -108,19 +118,29 @@ export class HistoryService {
   }
 
   /**
-   * Get recent changes across all tasks
+   * Get recent changes across all tasks in a project
    *
+   * @param projectPath - Path to the project
    * @param limit - Maximum number of entries to return (default 50)
    * @param options - Optional filters (action type, date range)
    * @returns Array of history entries with task info
    */
-  getRecentChanges(limit: number = 50, options?: HistoryQueryOptions): RecentActivityItem[] {
+  getRecentChanges(
+    projectPath: string,
+    limit: number = 50,
+    options?: HistoryQueryOptions
+  ): RecentActivityItem[] {
     if (!this.ENABLE_TASK_HISTORY) {
       return [];
     }
 
+    if (!projectPath) {
+      console.warn('[HistoryService] getRecentChanges called without projectPath');
+      return [];
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       // Build query with optional filters
       let query = `
@@ -172,16 +192,22 @@ export class HistoryService {
    *
    * Sessions group related changes that were made together (e.g., during a single edit session).
    *
+   * @param projectPath - Path to the project
    * @param sessionId - Session ID to get changes for
    * @returns SessionHistoryGroup with all changes in the session
    */
-  getSessionChanges(sessionId: string): SessionHistoryGroup | null {
+  getSessionChanges(projectPath: string, sessionId: string): SessionHistoryGroup | null {
     if (!this.ENABLE_TASK_HISTORY) {
       return null;
     }
 
+    if (!projectPath) {
+      console.warn('[HistoryService] getSessionChanges called without projectPath');
+      return null;
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const stmt = db.prepare(`
         SELECT * FROM task_history
@@ -213,16 +239,25 @@ export class HistoryService {
    *
    * Useful for displaying a session picker in the UI.
    *
+   * @param projectPath - Path to the project
    * @param limit - Maximum number of sessions to return (default 20)
    * @returns Array of session info objects
    */
-  getRecentSessions(limit: number = 20): { sessionId: string; entryCount: number; lastActivity: string }[] {
+  getRecentSessions(
+    projectPath: string,
+    limit: number = 20
+  ): { sessionId: string; entryCount: number; lastActivity: string }[] {
     if (!this.ENABLE_TASK_HISTORY) {
       return [];
     }
 
+    if (!projectPath) {
+      console.warn('[HistoryService] getRecentSessions called without projectPath');
+      return [];
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const stmt = db.prepare(`
         SELECT
@@ -252,16 +287,22 @@ export class HistoryService {
   /**
    * Query history with flexible filters
    *
+   * @param projectPath - Path to the project
    * @param options - Query options with filters and pagination
    * @returns HistoryQueryResult with entries and pagination info
    */
-  queryHistory(options: HistoryQueryOptions): HistoryQueryResult {
+  queryHistory(projectPath: string, options: HistoryQueryOptions): HistoryQueryResult {
     if (!this.ENABLE_TASK_HISTORY) {
       return { entries: [], total: 0, hasMore: false };
     }
 
+    if (!projectPath) {
+      console.warn('[HistoryService] queryHistory called without projectPath');
+      return { entries: [], total: 0, hasMore: false };
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const limit = options.limit ?? 50;
       const offset = options.offset ?? 0;
@@ -328,16 +369,22 @@ export class HistoryService {
   /**
    * Get the count of history entries for a task
    *
+   * @param projectPath - Path to the project
    * @param taskId - Task ID to count history for
    * @returns Number of history entries
    */
-  getTaskHistoryCount(taskId: string): number {
+  getTaskHistoryCount(projectPath: string, taskId: string): number {
     if (!this.ENABLE_TASK_HISTORY) {
       return 0;
     }
 
+    if (!projectPath) {
+      console.warn('[HistoryService] getTaskHistoryCount called without projectPath');
+      return 0;
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const stmt = db.prepare('SELECT COUNT(*) as count FROM task_history WHERE task_id = ?');
       const result = stmt.get(taskId) as { count: number };

@@ -17,15 +17,15 @@
  * ```typescript
  * const service = getSearchService();
  *
- * // Search tasks
- * const results = service.search({
+ * // Search tasks (requires project path)
+ * const results = service.search('/path/to/project', {
  *   query: 'authentication',
  *   filters: { status: ['backlog', 'in_progress'] },
  *   limit: 20
  * });
  *
  * // Get autocomplete suggestions
- * const suggestions = service.getSuggestions({
+ * const suggestions = service.getSuggestions('/path/to/project', {
  *   query: 'auth',
  *   limit: 10
  * });
@@ -44,11 +44,11 @@ import type {
   RecentSearch,
   SearchSortOption,
 } from '../shared/types';
-import { getDatabaseConnection } from './database';
+import { getProjectDatabase } from './database';
 
 /**
  * Search Service
- * Handles FTS5 search operations for tasks
+ * Handles FTS5 search operations for tasks in project-local databases
  */
 export class SearchService {
   private readonly ENABLE_SEARCH: boolean;
@@ -73,10 +73,11 @@ export class SearchService {
   /**
    * Perform a full-text search on tasks
    *
+   * @param projectPath - Path to the project
    * @param query - Search query parameters
    * @returns SearchQueryResult with ranked results and pagination info
    */
-  search(query: SearchQuery): SearchQueryResult {
+  search(projectPath: string, query: SearchQuery): SearchQueryResult {
     const startTime = Date.now();
 
     if (!this.ENABLE_SEARCH) {
@@ -85,6 +86,17 @@ export class SearchService {
         total: 0,
         query: query.query,
         searchTimeMs: 0,
+        hasMore: false,
+      };
+    }
+
+    if (!projectPath) {
+      console.warn('[SearchService] search called without projectPath');
+      return {
+        results: [],
+        total: 0,
+        query: query.query,
+        searchTimeMs: Date.now() - startTime,
         hasMore: false,
       };
     }
@@ -100,7 +112,7 @@ export class SearchService {
     }
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const limit = Math.min(query.limit ?? 50, 100);
       const offset = query.offset ?? 0;
@@ -196,11 +208,17 @@ export class SearchService {
   /**
    * Get autocomplete suggestions for a partial query
    *
+   * @param projectPath - Path to the project
    * @param options - Suggestion options
    * @returns SearchSuggestionResult with suggestions
    */
-  getSuggestions(options: SearchSuggestionOptions): SearchSuggestionResult {
+  getSuggestions(projectPath: string, options: SearchSuggestionOptions): SearchSuggestionResult {
     if (!this.ENABLE_SEARCH) {
+      return { suggestions: [], query: options.query };
+    }
+
+    if (!projectPath) {
+      console.warn('[SearchService] getSuggestions called without projectPath');
       return { suggestions: [], query: options.query };
     }
 
@@ -209,7 +227,7 @@ export class SearchService {
     const query = options.query?.trim() ?? '';
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       // 1. Include recent searches if requested (default: true)
       if (options.includeRecent !== false && query.length > 0) {
@@ -325,14 +343,21 @@ export class SearchService {
    *
    * Use this if the index becomes corrupted or out of sync.
    * This is a maintenance operation and should be used sparingly.
+   *
+   * @param projectPath - Path to the project
    */
-  rebuildIndex(): void {
+  rebuildIndex(projectPath: string): void {
     if (!this.ENABLE_SEARCH) {
       return;
     }
 
+    if (!projectPath) {
+      console.warn('[SearchService] rebuildIndex called without projectPath');
+      return;
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       // FTS5 rebuild command
       db.exec("INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild')");
@@ -345,11 +370,17 @@ export class SearchService {
   /**
    * Verify FTS5 is enabled in the SQLite build
    *
+   * @param projectPath - Path to the project
    * @returns true if FTS5 is available
    */
-  verifyFts5Available(): boolean {
+  verifyFts5Available(projectPath: string): boolean {
+    if (!projectPath) {
+      console.warn('[SearchService] verifyFts5Available called without projectPath');
+      return false;
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
       const stmt = db.prepare("SELECT sqlite_compileoption_used('ENABLE_FTS5') as enabled");
       const result = stmt.get() as { enabled: number };
       return result.enabled === 1;

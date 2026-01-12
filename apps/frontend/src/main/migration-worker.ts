@@ -43,7 +43,7 @@
 import { existsSync, readFileSync, readdirSync, mkdirSync, renameSync, statSync } from 'fs';
 import path from 'path';
 import type Database from 'better-sqlite3';
-import { getDatabaseConnection } from './database';
+import { getGlobalDatabase, getProjectDatabaseManager } from './database';
 import { getMigrationTracker } from './migration-tracker';
 import type { Task, TaskLogs } from '../shared/types';
 
@@ -525,13 +525,14 @@ export class MigrationWorker {
   ): Promise<void> {
     console.log(`[MigrationWorker] Migrating ${displayName} (${dataType})...`);
 
-    const dbConn = getDatabaseConnection();
+    // Use project-local database for all migrations (tasks, metadata, etc. are all project-local)
+    const projectDbConn = getProjectDatabaseManager().getConnection(projectPath);
 
     try {
       const jsonContent = readFileSync(filePath, 'utf-8');
       const data = JSON.parse(jsonContent);
 
-      dbConn.withTransaction(() => {
+      projectDbConn.withTransaction(() => {
         switch (dataType) {
           case 'tasks':
             // Handle spec files based on filename
@@ -540,9 +541,9 @@ export class MigrationWorker {
             if (fileName === 'task_metadata.json') {
               this.migrateTaskMetadataWithinTransaction(data, projectPath, specId);
             } else if (fileName === 'implementation_plan.json') {
-              this.migrateImplementationPlanWithinTransaction(data, specId);
+              this.migrateImplementationPlanWithinTransaction(data, projectPath, specId);
             } else if (fileName === 'task_logs.json') {
-              this.migrateTaskLogsWithinTransaction(data, specId);
+              this.migrateTaskLogsWithinTransaction(data, projectPath, specId);
             }
             break;
           case 'project_index':
@@ -589,8 +590,9 @@ export class MigrationWorker {
    */
   private isDataTypeMigrated(projectPath: string, dataType: MigrationDataType): boolean {
     try {
-      const db = getDatabaseConnection().getConnection();
-      const stmt = db.prepare('SELECT 1 FROM migration_status WHERE project_path = ? AND data_type = ?');
+      // migration_status is in the project-local database
+      const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
+      const stmt = projectDb.prepare('SELECT 1 FROM migration_status WHERE project_path = ? AND data_type = ?');
       const row = stmt.get(projectPath, dataType);
       return !!row;
     } catch {
@@ -607,8 +609,9 @@ export class MigrationWorker {
    */
   private markDataTypeMigrated(projectPath: string, dataType: MigrationDataType, files: string[]): void {
     try {
-      const db = getDatabaseConnection().getConnection();
-      const stmt = db.prepare(`
+      // migration_status is in the project-local database
+      const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
+      const stmt = projectDb.prepare(`
         INSERT OR REPLACE INTO migration_status (project_path, data_type, migrated_at, version, files_migrated_json)
         VALUES (?, ?, datetime('now'), '1.0', ?)
       `);
@@ -868,15 +871,17 @@ export class MigrationWorker {
     projectPath: string,
     specId: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects table, project-local DB for tasks table
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
     const specsDir = path.join(projectPath, '.auto-claude', 'specs', specId);
 
-    // Look up or create the project in the database
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    // Look up or create the project in the GLOBAL database
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
       // Project not in SQLite - migrate it from JSON store
       console.log(`[MigrationWorker] Project not in database, migrating: ${projectPath}`);
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) {
         console.log(`[MigrationWorker] Failed to migrate project: ${projectPath}, skipping task migration`);
         return;
@@ -961,8 +966,8 @@ export class MigrationWorker {
     const taskId = `task-${specId}`;
     const now = new Date().toISOString();
 
-    // Prepare insert statement
-    const insertStmt = db.prepare(`
+    // Prepare insert statement (tasks table is in PROJECT-LOCAL database)
+    const insertStmt = projectDb.prepare(`
       INSERT OR IGNORE INTO tasks (
         id, spec_id, project_id, title, description, status, review_reason,
         released_in_version, staged_in_main_project, staged_at, location, specs_path,
@@ -1012,9 +1017,10 @@ export class MigrationWorker {
    * This method updates the existing task's metadata with plan data.
    *
    * @param plan - Implementation plan data
+   * @param projectPath - Path to the project
    * @param specId - The spec directory name
    */
-  private migrateImplementationPlanWithinTransaction(_plan: unknown, specId: string): void {
+  private migrateImplementationPlanWithinTransaction(_plan: unknown, _projectPath: string, specId: string): void {
     // Implementation plans are associated with tasks via specId
     // The plan data is merged into the task's metadata_json
     console.log(`[MigrationWorker] Implementation plan for ${specId}: merged into task metadata`);
@@ -1032,25 +1038,16 @@ export class MigrationWorker {
    * Note: Task logs are stored in the task's metadata_json field.
    *
    * @param logs - Task logs data
+   * @param projectPath - Path to the project
    * @param specId - The spec directory name
    */
-  private migrateTaskLogsWithinTransaction(_logs: TaskLogs | TaskLogs[], specId: string): void {
+  private migrateTaskLogsWithinTransaction(_logs: TaskLogs | TaskLogs[], _projectPath: string, specId: string): void {
     // Task logs are associated with tasks via specId
     // The log data can be stored in task metadata if needed
     console.log(`[MigrationWorker] Task logs for ${specId}: stored in task metadata`);
 
     // If the database schema includes a separate task_logs table,
-    // add the migration logic here. Example:
-    //
-    // const db = getDatabaseConnection().getConnection();
-    // const logArray = Array.isArray(logs) ? logs : [logs];
-    // const insertStmt = db.prepare(`
-    //   INSERT OR IGNORE INTO task_logs (id, task_id, log_json, created_at)
-    //   VALUES (?, ?, ?, ?)
-    // `);
-    // for (const log of logArray) {
-    //   insertStmt.run(log.id, log.taskId, JSON.stringify(log), new Date().toISOString());
-    // }
+    // add the migration logic here.
   }
 
   // ============================================
@@ -1190,12 +1187,14 @@ export class MigrationWorker {
     data: Record<string, unknown>,
     projectPath: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects, project-local DB for project_index
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
 
-    // Look up or create the project in the database
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    // Look up or create the project in the GLOBAL database
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) {
         console.log(`[MigrationWorker] Failed to migrate project, skipping project_index`);
         return;
@@ -1204,11 +1203,11 @@ export class MigrationWorker {
     }
     const projectId = projectRow.id;
 
-    // Insert project_index record
+    // Insert project_index record (project-local DB)
     const projectRoot = (data.project_root as string) || projectPath;
     const projectType = (data.project_type as string) || 'single';
 
-    const insertIndexStmt = db.prepare(`
+    const insertIndexStmt = projectDb.prepare(`
       INSERT OR REPLACE INTO project_index (
         project_id, project_root, project_type, infrastructure_json, conventions_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
@@ -1223,17 +1222,17 @@ export class MigrationWorker {
     );
 
     // Get the project_index id for services
-    const indexRow = db.prepare('SELECT id FROM project_index WHERE project_id = ?').get(projectId) as { id: number } | undefined;
+    const indexRow = projectDb.prepare('SELECT id FROM project_index WHERE project_id = ?').get(projectId) as { id: number } | undefined;
     if (!indexRow) {
       console.log(`[MigrationWorker] Failed to get project_index id`);
       return;
     }
     const projectIndexId = indexRow.id;
 
-    // Insert services if present
+    // Insert services if present (project-local DB)
     const services = data.services as Record<string, Record<string, unknown>> | undefined;
     if (services) {
-      const insertServiceStmt = db.prepare(`
+      const insertServiceStmt = projectDb.prepare(`
         INSERT OR IGNORE INTO project_services (
           project_index_id, service_name, service_path, language, framework, service_type, package_manager, dependencies_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1266,12 +1265,14 @@ export class MigrationWorker {
     data: Record<string, unknown>,
     projectPath: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects, project-local DB for other tables
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
 
     // Look up or create the project
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) return;
       projectRow = { id: projectId };
     }
@@ -1281,7 +1282,7 @@ export class MigrationWorker {
     const projectName = (data.project_name as string) || path.basename(projectPath);
 
     // Insert roadmap
-    const insertRoadmapStmt = db.prepare(`
+    const insertRoadmapStmt = projectDb.prepare(`
       INSERT OR REPLACE INTO roadmaps (
         id, project_id, project_name, version, vision, target_audience_json, metadata_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
@@ -1300,12 +1301,12 @@ export class MigrationWorker {
     // Insert phases
     const phases = data.phases as Array<Record<string, unknown>> | undefined;
     if (phases) {
-      const insertPhaseStmt = db.prepare(`
+      const insertPhaseStmt = projectDb.prepare(`
         INSERT OR IGNORE INTO roadmap_phases (id, roadmap_id, name, description, phase_order, status)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
 
-      const insertMilestoneStmt = db.prepare(`
+      const insertMilestoneStmt = projectDb.prepare(`
         INSERT OR IGNORE INTO roadmap_milestones (id, phase_id, title, description, status, features_json)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
@@ -1342,7 +1343,7 @@ export class MigrationWorker {
     // Insert features
     const features = data.features as Array<Record<string, unknown>> | undefined;
     if (features) {
-      const insertFeatureStmt = db.prepare(`
+      const insertFeatureStmt = projectDb.prepare(`
         INSERT OR IGNORE INTO roadmap_features (
           id, roadmap_id, phase_id, title, description, rationale, priority, complexity, impact,
           status, dependencies_json, acceptance_criteria_json, user_stories_json, linked_spec_id, competitor_insight_ids_json
@@ -1384,18 +1385,20 @@ export class MigrationWorker {
     data: Record<string, unknown>,
     projectPath: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects, project-local DB for other tables
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
 
     // Look up or create the project
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) return;
       projectRow = { id: projectId };
     }
     const projectId = projectRow.id;
 
-    const insertStmt = db.prepare(`
+    const insertStmt = projectDb.prepare(`
       INSERT OR REPLACE INTO roadmap_discovery (
         project_id, project_name, project_type, tech_stack_json, target_audience_json,
         product_vision_json, current_state_json, competitive_context_json, constraints_json, created_at
@@ -1430,12 +1433,14 @@ export class MigrationWorker {
     projectPath: string,
     fileName: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects, project-local DB for other tables
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
 
     // Look up or create the project
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) return;
       projectRow = { id: projectId };
     }
@@ -1446,7 +1451,7 @@ export class MigrationWorker {
       // Main ideation session file
       const sessionId = (data.id as string) || `ideation-${Date.now()}`;
 
-      const insertSessionStmt = db.prepare(`
+      const insertSessionStmt = projectDb.prepare(`
         INSERT OR REPLACE INTO ideation_sessions (id, project_id, config_json, created_at, updated_at)
         VALUES (?, ?, ?, datetime('now'), datetime('now'))
       `);
@@ -1460,7 +1465,7 @@ export class MigrationWorker {
       // Insert ideas from the session
       const ideas = data.ideas as Array<Record<string, unknown>> | undefined;
       if (ideas) {
-        this.insertIdeas(db, sessionId, ideas);
+        this.insertIdeas(projectDb, sessionId, ideas);
       }
 
       console.log(`[MigrationWorker] Migrated ideation session with ${ideas?.length || 0} ideas`);
@@ -1472,7 +1477,7 @@ export class MigrationWorker {
       // Create or find session for this type
       const sessionId = `ideation-${ideaType}-${projectId}`;
 
-      const insertSessionStmt = db.prepare(`
+      const insertSessionStmt = projectDb.prepare(`
         INSERT OR IGNORE INTO ideation_sessions (id, project_id, config_json, created_at, updated_at)
         VALUES (?, ?, ?, datetime('now'), datetime('now'))
       `);
@@ -1485,7 +1490,7 @@ export class MigrationWorker {
 
       // The file may contain an array of ideas directly or have an 'ideas' property
       const ideas = Array.isArray(data) ? data : (data.ideas as Array<Record<string, unknown>> || [data]);
-      this.insertIdeas(db, sessionId, ideas, ideaType);
+      this.insertIdeas(projectDb, sessionId, ideas, ideaType);
 
       console.log(`[MigrationWorker] Migrated ${ideaType} ideation with ${ideas.length} ideas`);
     }
@@ -1542,25 +1547,27 @@ export class MigrationWorker {
     data: Record<string, Record<string, unknown>>,
     projectPath: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects, project-local DB for other tables
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
 
     // Look up or create the project
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) return;
       projectRow = { id: projectId };
     }
     const projectId = projectRow.id;
 
-    const insertEvolutionStmt = db.prepare(`
+    const insertEvolutionStmt = projectDb.prepare(`
       INSERT OR REPLACE INTO file_evolution (
         project_id, file_path, baseline_commit, baseline_captured_at, baseline_content_hash, baseline_snapshot_path,
         created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     `);
 
-    const insertSnapshotStmt = db.prepare(`
+    const insertSnapshotStmt = projectDb.prepare(`
       INSERT OR IGNORE INTO file_snapshots (
         file_evolution_id, task_id, task_intent, started_at, completed_at,
         content_hash_before, content_hash_after, semantic_changes_json, raw_diff
@@ -1583,7 +1590,7 @@ export class MigrationWorker {
       fileCount++;
 
       // Get the file_evolution id
-      const evolutionRow = db.prepare('SELECT id FROM file_evolution WHERE project_id = ? AND file_path = ?')
+      const evolutionRow = projectDb.prepare('SELECT id FROM file_evolution WHERE project_id = ? AND file_path = ?')
         .get(projectId, filePath) as { id: number } | undefined;
       if (!evolutionRow) continue;
       const fileEvolutionId = evolutionRow.id;
@@ -1598,7 +1605,7 @@ export class MigrationWorker {
           if (rawTaskId) {
             // Try both formats: "task-{specId}" and raw "{specId}"
             const taskIdWithPrefix = rawTaskId.startsWith('task-') ? rawTaskId : `task-${rawTaskId}`;
-            const taskExists = db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(taskIdWithPrefix);
+            const taskExists = projectDb.prepare('SELECT 1 FROM tasks WHERE id = ?').get(taskIdWithPrefix);
             if (taskExists) {
               taskId = taskIdWithPrefix;
             }
@@ -1634,12 +1641,14 @@ export class MigrationWorker {
     data: Record<string, unknown>,
     projectPath: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects, project-local DB for other tables
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
 
     // Look up or create the project
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) return;
       projectRow = { id: projectId };
     }
@@ -1652,7 +1661,7 @@ export class MigrationWorker {
     }
 
     // Insert file timeline
-    const insertTimelineStmt = db.prepare(`
+    const insertTimelineStmt = projectDb.prepare(`
       INSERT OR REPLACE INTO file_timelines (
         project_id, file_path, main_branch_history_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, datetime('now'))
@@ -1666,7 +1675,7 @@ export class MigrationWorker {
     );
 
     // Get the timeline id
-    const timelineRow = db.prepare('SELECT id FROM file_timelines WHERE project_id = ? AND file_path = ?')
+    const timelineRow = projectDb.prepare('SELECT id FROM file_timelines WHERE project_id = ? AND file_path = ?')
       .get(projectId, filePath) as { id: number } | undefined;
     if (!timelineRow) return;
     const timelineId = timelineRow.id;
@@ -1674,7 +1683,7 @@ export class MigrationWorker {
     // Insert task views
     const taskViews = data.task_views as Record<string, Record<string, unknown>> | undefined;
     if (taskViews) {
-      const insertTaskViewStmt = db.prepare(`
+      const insertTaskViewStmt = projectDb.prepare(`
         INSERT OR IGNORE INTO timeline_task_views (
           timeline_id, task_id, branch_point_commit, branch_point_content_hash, branch_point_timestamp,
           worktree_content_hash, worktree_last_modified, task_title, task_description, from_plan,
@@ -1686,7 +1695,7 @@ export class MigrationWorker {
         // Convert raw spec ID to task ID format, and verify the task exists
         // (timeline_task_views has FK constraint to tasks with ON DELETE CASCADE)
         const taskIdWithPrefix = rawTaskId.startsWith('task-') ? rawTaskId : `task-${rawTaskId}`;
-        const taskExists = db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(taskIdWithPrefix);
+        const taskExists = projectDb.prepare('SELECT 1 FROM tasks WHERE id = ?').get(taskIdWithPrefix);
         if (!taskExists) {
           console.log(`[MigrationWorker] Skipping task view for non-existent task: ${rawTaskId}`);
           continue;
@@ -1727,12 +1736,14 @@ export class MigrationWorker {
     data: Record<string, unknown>,
     projectPath: string
   ): void {
-    const db = getDatabaseConnection().getConnection();
+    // Use global DB for projects, project-local DB for other tables
+    const globalDb = getGlobalDatabase().getConnection();
+    const projectDb = getProjectDatabaseManager().getConnection(projectPath).getConnection();
 
     // Look up or create the project
-    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    let projectRow = globalDb.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
     if (!projectRow) {
-      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      const projectId = this.migrateProjectToDatabase(globalDb, projectPath);
       if (!projectId) return;
       projectRow = { id: projectId };
     }
@@ -1741,7 +1752,7 @@ export class MigrationWorker {
     const sessionId = (data.id as string) || `session-${Date.now()}`;
 
     // Insert session
-    const insertSessionStmt = db.prepare(`
+    const insertSessionStmt = projectDb.prepare(`
       INSERT OR REPLACE INTO insight_sessions (id, project_id, title, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?)
     `);
@@ -1757,7 +1768,7 @@ export class MigrationWorker {
     // Insert messages
     const messages = data.messages as Array<Record<string, unknown>> | undefined;
     if (messages) {
-      const insertMessageStmt = db.prepare(`
+      const insertMessageStmt = projectDb.prepare(`
         INSERT OR IGNORE INTO session_messages (id, session_id, role, content, timestamp, tools_used_json)
         VALUES (?, ?, ?, ?, ?, ?)
       `);

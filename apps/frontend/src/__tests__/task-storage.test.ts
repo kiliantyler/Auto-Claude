@@ -83,8 +83,7 @@ describe('TaskStorage', () => {
       CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at);
     `);
 
-    // Initialize storage (with dual-write disabled for tests)
-    process.env.ENABLE_DUAL_WRITE = 'false';
+    // Initialize storage
     storage = new TaskStorage();
   });
 
@@ -110,8 +109,6 @@ describe('TaskStorage', () => {
         }
       }
     });
-
-    delete process.env.ENABLE_DUAL_WRITE;
   });
 
   describe('createTask', () => {

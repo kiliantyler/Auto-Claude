@@ -3,18 +3,29 @@ import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 import { copyFileSync } from 'fs';
 
-// Plugin to copy SQL schema file to output directory
+// Plugin to copy SQL schema files to output directory
 function copySchemaPlugin() {
   return {
     name: 'copy-schema',
     writeBundle() {
-      const src = resolve(__dirname, 'src/main/database-schema.sql');
-      const dest = resolve(__dirname, 'out/main/database-schema.sql');
+      // Copy project-local schema (tasks, history, metrics, etc.)
+      const projectSrc = resolve(__dirname, 'src/main/database-schema.sql');
+      const projectDest = resolve(__dirname, 'out/main/database-schema.sql');
       try {
-        copyFileSync(src, dest);
+        copyFileSync(projectSrc, projectDest);
         console.log('[copy-schema] Copied database-schema.sql to out/main/');
       } catch (error) {
         console.error('[copy-schema] Failed to copy database-schema.sql:', error);
+      }
+
+      // Copy global schema (projects registry, app-level metadata)
+      const globalSrc = resolve(__dirname, 'src/main/database-schema-global.sql');
+      const globalDest = resolve(__dirname, 'out/main/database-schema-global.sql');
+      try {
+        copyFileSync(globalSrc, globalDest);
+        console.log('[copy-schema] Copied database-schema-global.sql to out/main/');
+      } catch (error) {
+        console.error('[copy-schema] Failed to copy database-schema-global.sql:', error);
       }
     }
   };

@@ -6,7 +6,7 @@ import path from 'path';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from 'fs';
 import { projectStore } from '../project-store';
 import { parseEnvFile } from './utils';
-import { getTaskStorage } from '../task-storage';
+import { getProjectTaskStorage } from '../task-storage';
 
 
 import { AgentManager } from '../agent';
@@ -513,7 +513,7 @@ ${issue.description || 'No description provided.'}
             };
 
             try {
-              const taskStorage = getTaskStorage();
+              const taskStorage = getProjectTaskStorage(project.path);
               taskStorage.createTask(task);
               console.warn(`[LINEAR_IMPORT] Created task in SQLite: ${specId}`);
             } catch (dbErr) {

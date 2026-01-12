@@ -11,7 +11,7 @@
 import path from 'path';
 import { AUTO_BUILD_PATHS, getSpecsDir } from '../../../shared/constants';
 import type { TaskStatus, Project, Task, Subtask, ExecutionProgress } from '../../../shared/types';
-import { getTaskStorage } from '../../task-storage';
+import { getProjectTaskStorage } from '../../task-storage';
 import { projectStore } from '../../project-store';
 
 /**
@@ -47,7 +47,7 @@ export function mapStatusToPlanStatus(status: TaskStatus): string {
  *
  * @param _planPath - Ignored (kept for API compatibility during migration)
  * @param status - The TaskStatus to persist
- * @param projectId - Optional project ID to invalidate cache
+ * @param projectId - Project ID (required for database lookup)
  * @param taskId - Task ID to update (required for SQLite)
  * @returns true if status was persisted, false otherwise
  */
@@ -62,15 +62,25 @@ export async function persistPlanStatus(
     return false;
   }
 
+  if (!projectId) {
+    console.warn('[plan-file-utils] persistPlanStatus called without projectId - cannot update SQLite');
+    return false;
+  }
+
   try {
-    const storage = getTaskStorage();
+    // Look up project to get path for project-local database
+    const project = projectStore.getProject(projectId);
+    if (!project) {
+      console.warn(`[plan-file-utils] Project not found: ${projectId}`);
+      return false;
+    }
+
+    const storage = getProjectTaskStorage(project.path);
     const result = storage.updateTask(taskId, { status });
 
     if (result) {
       // Invalidate tasks cache since status changed
-      if (projectId) {
-        projectStore.invalidateTasksCache(projectId);
-      }
+      projectStore.invalidateTasksCache(projectId);
       return true;
     }
     return false;
@@ -85,7 +95,7 @@ export async function persistPlanStatus(
  *
  * @param _planPath - Ignored (kept for API compatibility during migration)
  * @param status - The TaskStatus to persist
- * @param projectId - Optional project ID to invalidate cache
+ * @param projectId - Project ID (required for database lookup)
  * @param taskId - Task ID to update (required for SQLite)
  * @returns true if status was persisted, false otherwise
  */
@@ -100,15 +110,25 @@ export function persistPlanStatusSync(
     return false;
   }
 
+  if (!projectId) {
+    console.warn('[plan-file-utils] persistPlanStatusSync called without projectId - cannot update SQLite');
+    return false;
+  }
+
   try {
-    const storage = getTaskStorage();
+    // Look up project to get path for project-local database
+    const project = projectStore.getProject(projectId);
+    if (!project) {
+      console.warn(`[plan-file-utils] Project not found: ${projectId}`);
+      return false;
+    }
+
+    const storage = getProjectTaskStorage(project.path);
     const result = storage.updateTask(taskId, { status });
 
     if (result) {
       // Invalidate tasks cache since status changed
-      if (projectId) {
-        projectStore.invalidateTasksCache(projectId);
-      }
+      projectStore.invalidateTasksCache(projectId);
       return true;
     }
     return false;
@@ -123,6 +143,7 @@ export function persistPlanStatusSync(
  *
  * @param taskId - Task ID to update
  * @param updates - Partial task updates
+ * @param projectPath - Path to the project (required for project-local database)
  * @returns The updated task, or null if not found
  */
 export function updateTaskInDatabase(
@@ -133,10 +154,16 @@ export function updateTaskInDatabase(
     executionProgress: ExecutionProgress;
     title: string;
     description: string;
-  }>
+  }>,
+  projectPath?: string
 ): Task | null {
+  if (!projectPath) {
+    console.warn(`[plan-file-utils] updateTaskInDatabase called without projectPath - cannot update SQLite`);
+    return null;
+  }
+
   try {
-    const storage = getTaskStorage();
+    const storage = getProjectTaskStorage(projectPath);
     return storage.updateTask(taskId, updates);
   } catch (err) {
     console.warn(`[plan-file-utils] Could not update task ${taskId}:`, err);
@@ -148,12 +175,19 @@ export function updateTaskInDatabase(
  * Create a new task in SQLite database if it doesn't exist.
  * This replaces the old createPlanIfNotExists function.
  *
- * @param task - The task to create
+ * @param task - The task to create (must include projectId)
  * @param status - Initial status for the task
  */
 export function createTaskIfNotExists(task: Task, status: TaskStatus): void {
   try {
-    const storage = getTaskStorage();
+    // Look up project to get path for project-local database
+    const project = projectStore.getProject(task.projectId);
+    if (!project) {
+      console.warn(`[plan-file-utils] Project not found: ${task.projectId}`);
+      return;
+    }
+
+    const storage = getProjectTaskStorage(project.path);
 
     // Check if task already exists
     const existing = storage.getTask(task.id);

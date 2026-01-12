@@ -37,7 +37,7 @@ import { setupErrorLogging } from './app-logger';
 import { initSentryMain } from './sentry';
 import { preWarmToolCache } from './cli-tool-manager';
 import { initializeClaudeProfileManager } from './claude-profile-manager';
-import { getDatabaseConnection, closeDatabaseConnection } from './database';
+import { getDatabaseConnection, closeAllDatabases } from './database';
 import { getDatabaseEventPoller, stopDatabaseEventPoller } from './database-event-poller';
 import { getMigrationTracker } from './migration-tracker';
 import { getMigrationWorker } from './migration-worker';
@@ -109,46 +109,48 @@ function cleanupStaleUpdateMetadata(): void {
 }
 
 /**
- * Initialize SQLite database and create schema.
+ * Initialize SQLite databases and create schemas.
  *
- * Creates the database file at userData/.auto-claude/tasks.db and executes
- * the schema SQL to set up tables, indexes, and triggers.
+ * Initializes the GLOBAL database at userData/.auto-claude/app.db with
+ * database-schema-global.sql (contains: projects registry, metadata).
+ *
+ * Project-local databases at <project>/.auto-claude/tasks.db are initialized
+ * lazily when first accessed via ProjectDatabaseManager.
  */
 function initializeDatabase(): void {
   try {
-    // Get database connection (creates file if it doesn't exist)
+    // Get global database connection (creates file if it doesn't exist)
     const dbConn = getDatabaseConnection();
-    const db = dbConn.getConnection();
 
-    // Find schema SQL file
-    // In dev: __dirname is out/main, schema is at ../../src/main/database-schema.sql
+    // Find GLOBAL schema SQL file
+    // In dev: __dirname is out/main, schema is at ../../src/main/database-schema-global.sql
     // In prod: schema should be in the same directory as compiled JS
     const possibleSchemaPaths = [
-      join(__dirname, 'database-schema.sql'),           // Production: alongside compiled JS
-      join(__dirname, '../../src/main/database-schema.sql'), // Development: from out/main to src
+      join(__dirname, 'database-schema-global.sql'),           // Production: alongside compiled JS
+      join(__dirname, '../../src/main/database-schema-global.sql'), // Development: from out/main to src
     ];
 
-    let schemaSQL: string | null = null;
     let schemaPath: string | null = null;
 
     for (const path of possibleSchemaPaths) {
       if (existsSync(path)) {
-        schemaSQL = readFileSync(path, 'utf-8');
         schemaPath = path;
         break;
       }
     }
 
-    if (!schemaSQL) {
-      throw new Error(`Could not find database-schema.sql in any of these locations: ${possibleSchemaPaths.join(', ')}`);
+    if (!schemaPath) {
+      throw new Error(`Could not find database-schema-global.sql in any of these locations: ${possibleSchemaPaths.join(', ')}`);
     }
 
-    // Execute schema SQL (creates tables, indexes, triggers)
-    // SQLite exec() can run multiple statements separated by semicolons
-    db.exec(schemaSQL);
+    // Initialize the global database schema using the built-in method
+    const success = dbConn.migrateIfNeeded(schemaPath);
+    if (!success) {
+      throw new Error('Failed to initialize global database schema');
+    }
 
-    console.log(`[Database] Schema initialized from: ${schemaPath}`);
-    console.log(`[Database] Database ready at: ${dbConn.getPath()}`);
+    console.log(`[Database] Global database initialized from: ${schemaPath}`);
+    console.log(`[Database] Global database ready at: ${dbConn.getPath()}`);
   } catch (error: unknown) {
     console.error('[Database] Failed to initialize database:', error);
     throw error;
@@ -623,8 +625,9 @@ app.on('before-quit', async () => {
   stopDatabaseEventPoller();
   console.warn('[main] Database event poller stopped');
 
-  // Close database connection
-  closeDatabaseConnection();
+  // Close all database connections (global + project-local)
+  closeAllDatabases();
+  console.warn('[main] All database connections closed');
 
   // Kill all running agent processes
   if (agentManager) {

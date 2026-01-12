@@ -5,12 +5,16 @@ Implementation Plan Models
 
 Defines the complete implementation plan for a feature/task with progress
 tracking, status management, and follow-up capabilities.
+
+Supports both JSON file storage (legacy) and SQLite database storage.
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from .enums import PhaseType, SubtaskStatus, WorkflowType
 from .phase import Phase
@@ -99,7 +103,15 @@ class ImplementationPlan:
         )
 
     def save(self, path: Path):
-        """Save plan to JSON file."""
+        """Save plan to SQLite database.
+
+        The project_dir and spec_id are derived from the path.
+
+        Path format: <project>/.auto-claude/specs/<spec_id>/implementation_plan.json
+
+        Args:
+            path: Path to the implementation_plan.json file (used to derive project_dir and spec_id)
+        """
         self.updated_at = datetime.now().isoformat()
         if not self.created_at:
             self.created_at = self.updated_at
@@ -107,9 +119,44 @@ class ImplementationPlan:
         # Auto-update status based on subtask completion
         self.update_status_from_subtasks()
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        # Derive project_dir and spec_id from path
+        # Path format: <project>/.auto-claude/specs/<spec_id>/implementation_plan.json
+        project_dir, spec_id = self._derive_project_and_spec(path)
+        if project_dir and spec_id:
+            if self.save_to_db(project_dir, spec_id):
+                return
+            else:
+                raise ValueError(f"Failed to save plan to SQLite for {spec_id}")
+        else:
+            raise ValueError(
+                f"Could not derive project_dir/spec_id from path: {path}. "
+                "Expected format: <project>/.auto-claude/specs/<spec_id>/implementation_plan.json"
+            )
+
+    @staticmethod
+    def _derive_project_and_spec(path: Path) -> tuple[Optional[Path], Optional[str]]:
+        """Derive project_dir and spec_id from a JSON file path.
+
+        Path format: <project>/.auto-claude/specs/<spec_id>/implementation_plan.json
+
+        Returns:
+            Tuple of (project_dir, spec_id) or (None, None) if cannot derive
+        """
+        path = Path(path).resolve()
+
+        # spec_id is the parent directory name
+        spec_id = path.parent.name
+
+        # Walk up to find .auto-claude directory
+        current = path.parent
+        while current != current.parent:
+            if current.name == "specs" and current.parent.name == ".auto-claude":
+                # Found it: current.parent.parent is the project root
+                project_dir = current.parent.parent
+                return project_dir, spec_id
+            current = current.parent
+
+        return None, None
 
     def update_status_from_subtasks(self):
         """Update overall status and planStatus based on subtask completion state.
@@ -171,9 +218,72 @@ class ImplementationPlan:
 
     @classmethod
     def load(cls, path: Path) -> "ImplementationPlan":
-        """Load plan from JSON file."""
-        with open(path, encoding="utf-8") as f:
-            return cls.from_dict(json.load(f))
+        """Load plan from SQLite database.
+
+        If not found in SQLite but a JSON file exists, migrates from JSON (one-time).
+
+        Path format: <project>/.auto-claude/specs/<spec_id>/implementation_plan.json
+
+        Args:
+            path: Path to the implementation_plan.json file (used to derive project_dir and spec_id)
+
+        Returns:
+            ImplementationPlan object
+
+        Raises:
+            FileNotFoundError: If plan not found in SQLite or JSON
+        """
+        path = Path(path)
+
+        # Derive project_dir and spec_id from path
+        project_dir, spec_id = cls._derive_project_and_spec(path)
+        if project_dir and spec_id:
+            # Try to load from SQLite first
+            plan = cls.load_from_db(project_dir, spec_id)
+            if plan:
+                return plan
+
+            # Not in SQLite - check if JSON file exists for migration
+            if path.exists():
+                print(f"[PLAN] Migrating plan from JSON to SQLite: {path}")
+                with open(path, encoding="utf-8") as f:
+                    plan = cls.from_dict(json.load(f))
+                # Save to SQLite for future use
+                plan.save_to_db(project_dir, spec_id)
+                return plan
+
+            raise FileNotFoundError(
+                f"Plan not found in SQLite for spec {spec_id} and no JSON file at {path}"
+            )
+
+        raise FileNotFoundError(
+            f"Could not derive project_dir/spec_id from path: {path}. "
+            "Expected format: <project>/.auto-claude/specs/<spec_id>/implementation_plan.json"
+        )
+
+    @classmethod
+    def exists(cls, path: Path) -> bool:
+        """Check if a plan exists at the given path.
+
+        Checks SQLite database first, then falls back to checking
+        if the JSON file exists (for migration purposes).
+
+        Args:
+            path: Path to the implementation_plan.json file
+
+        Returns:
+            True if plan exists, False otherwise
+        """
+        path = Path(path)
+
+        project_dir, spec_id = cls._derive_project_and_spec(path)
+        if project_dir and spec_id:
+            if cls.exists_in_db(project_dir, spec_id):
+                return True
+            # Also check JSON for migration purposes
+            return path.exists()
+
+        return path.exists()
 
     def get_available_phases(self) -> list[Phase]:
         """Get phases whose dependencies are satisfied."""
@@ -370,3 +480,128 @@ class ImplementationPlan:
         self.recoveryNote = None
 
         return True
+
+    # ==========================================
+    # SQLite Database Storage Methods
+    # ==========================================
+
+    def save_to_db(self, project_dir: Path, spec_id: str) -> bool:
+        """Save plan to SQLite database.
+
+        Args:
+            project_dir: Path to the project root directory
+            spec_id: Spec ID (e.g., "001-feature-name")
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        from db import init_db_for_project
+        from db.repositories import ImplementationPlanRepository
+
+        db = init_db_for_project(project_dir)
+        repo = ImplementationPlanRepository(db, spec_id)
+        return repo.save(self)
+
+    @classmethod
+    def load_from_db(
+        cls, project_dir: Path, spec_id: str
+    ) -> Optional["ImplementationPlan"]:
+        """Load plan from SQLite database.
+
+        Args:
+            project_dir: Path to the project root directory
+            spec_id: Spec ID (e.g., "001-feature-name")
+
+        Returns:
+            ImplementationPlan object or None if not found
+        """
+        from db import init_db_for_project
+        from db.repositories import ImplementationPlanRepository
+
+        db = init_db_for_project(project_dir)
+        repo = ImplementationPlanRepository(db, spec_id)
+        return repo.load()
+
+    def save_with_db(
+        self,
+        project_dir: Path,
+        spec_id: str
+    ) -> None:
+        """Save plan to SQLite database.
+
+        Args:
+            project_dir: Path to project root
+            spec_id: Spec ID (e.g., "001-feature-name")
+
+        Raises:
+            ValueError: If save fails
+        """
+        self.updated_at = datetime.now().isoformat()
+        if not self.created_at:
+            self.created_at = self.updated_at
+
+        # Auto-update status based on subtask completion
+        self.update_status_from_subtasks()
+
+        # Save to SQLite
+        if not self.save_to_db(project_dir, spec_id):
+            raise ValueError(f"Failed to save plan to SQLite for {spec_id}")
+
+    @classmethod
+    def load_with_db(
+        cls,
+        project_dir: Path,
+        spec_id: str,
+        migrate_from_json: Optional[Path] = None
+    ) -> "ImplementationPlan":
+        """Load plan from SQLite database.
+
+        If migrate_from_json is provided and the plan doesn't exist in SQLite,
+        it will be migrated from the JSON file (one-time migration).
+
+        Args:
+            project_dir: Path to project root
+            spec_id: Spec ID (e.g., "001-feature-name")
+            migrate_from_json: Optional path to JSON file for one-time migration
+
+        Returns:
+            ImplementationPlan object
+
+        Raises:
+            FileNotFoundError: If plan not found
+        """
+        # Try to load from SQLite
+        plan = cls.load_from_db(project_dir, spec_id)
+        if plan:
+            return plan
+
+        # If not in SQLite, try migration from JSON (one-time)
+        if migrate_from_json and migrate_from_json.exists():
+            print(f"[PLAN] Migrating plan from JSON: {migrate_from_json}")
+            with open(migrate_from_json, encoding="utf-8") as f:
+                plan = cls.from_dict(json.load(f))
+            # Save to SQLite for future use
+            plan.save_to_db(project_dir, spec_id)
+            return plan
+
+        raise FileNotFoundError(
+            f"Plan not found in SQLite for spec {spec_id}"
+        )
+
+    @classmethod
+    def exists_in_db(cls, project_dir: Path, spec_id: str) -> bool:
+        """Check if a plan exists in the SQLite database.
+
+        Args:
+            project_dir: Path to the project root directory
+            spec_id: Spec ID (e.g., "001-feature-name")
+
+        Returns:
+            True if plan exists, False otherwise
+        """
+        from db import init_db_for_project
+        from db.repositories import ImplementationPlanRepository
+
+        db = init_db_for_project(project_dir)
+        repo = ImplementationPlanRepository(db, spec_id)
+        return repo.exists()

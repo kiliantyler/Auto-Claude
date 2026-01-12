@@ -12,7 +12,7 @@ import { getClaudeProfileManager } from '../../claude-profile-manager';
 import { findTaskWorktree } from '../../worktree-paths';
 import { projectStore } from '../../project-store';
 import { getToolPath } from '../../cli-tool-manager';
-import { getTaskStorage } from '../../task-storage';
+import { getProjectTaskStorage } from '../../task-storage';
 
 /**
  * NOTE: Task execution handlers - ALL task data persistence goes through SQLite.
@@ -199,11 +199,11 @@ export function registerTaskExecutionHandlers(
         console.log(`[TASK_START] IPC sent immediately for task ${taskId}, deferring file persistence`);
       }
 
-      // Persist status to SQLite database
+      // Persist status to project-local SQLite database
       // Use task.id (the actual database ID) not taskId (which might be specId)
       setImmediate(() => {
         try {
-          const storage = getTaskStorage();
+          const storage = getProjectTaskStorage(project.path);
           storage.updateTask(task.id, { status: 'in_progress' });
           if (DEBUG) {
             console.log(`[TASK_START] Updated task status in database: ${task.id} -> in_progress`);
@@ -323,10 +323,10 @@ export function registerTaskExecutionHandlers(
             }
           }
 
-          // Update status in SQLite database
+          // Update status in project-local SQLite database
           // Use task.id (the actual database ID) not taskId (which might be specId)
           try {
-            const storage = getTaskStorage();
+            const storage = getProjectTaskStorage(project.path);
             storage.updateTask(task.id, { status: 'backlog' });
             if (DEBUG) {
               console.log(`[TASK_STOP] Updated task status in database: ${task.id} -> backlog`);
@@ -472,10 +472,10 @@ export function registerTaskExecutionHandlers(
         );
       }
 
-      // Dual-write: Update status in SQLite database
+      // Update status in project-local SQLite database
       // Use task.id (the actual database ID) not taskId (which might be specId)
       try {
-        const storage = getTaskStorage();
+        const storage = getProjectTaskStorage(project.path);
         storage.updateTask(task.id, { status: 'backlog' });
         if (DEBUG) {
           console.log(`[TASK_RESET] Updated task status in database: ${task.id} -> backlog`);
@@ -561,10 +561,10 @@ export function registerTaskExecutionHandlers(
           );
         }
 
-        // Dual-write: Update status in SQLite database
+        // Update status in project-local SQLite database
         // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
-          const storage = getTaskStorage();
+          const storage = getProjectTaskStorage(project.path);
           storage.updateTask(task.id, { status: 'done' });
           console.debug(`[TASK_REVIEW] Updated task status in database: ${task.id} -> done`);
         } catch (dbErr) {
@@ -641,10 +641,10 @@ export function registerTaskExecutionHandlers(
           );
         }
 
-        // Dual-write: Update status in SQLite database
+        // Update status in project-local SQLite database
         // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
-          const storage = getTaskStorage();
+          const storage = getProjectTaskStorage(project.path);
           storage.updateTask(task.id, { status: 'in_progress' });
           console.debug(`[TASK_REVIEW] Updated task status in database: ${task.id} -> in_progress`);
         } catch (dbErr) {
@@ -836,10 +836,10 @@ export function registerTaskExecutionHandlers(
           }
         }
 
-        // Update status in SQLite database
+        // Update status in project-local SQLite database
         // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
-          const storage = getTaskStorage();
+          const storage = getProjectTaskStorage(project.path);
           storage.updateTask(task.id, { status });
           projectStore.invalidateTasksCache(project.id);
           console.debug(`[TASK_UPDATE_STATUS] Updated task status in database: ${task.id} -> ${status}`);
@@ -936,8 +936,8 @@ export function registerTaskExecutionHandlers(
         if (allCompleted && task.subtasks && task.subtasks.length > 0) {
           console.log('[Recovery] Task is fully complete (all subtasks done), setting to human_review without restart');
 
-          // Update status in SQLite
-          const storage = getTaskStorage();
+          // Update status in project-local SQLite
+          const storage = getProjectTaskStorage(project.path);
           storage.updateTask(task.id, { status: 'human_review' });
           projectStore.invalidateTasksCache(project.id);
 
@@ -976,8 +976,8 @@ export function registerTaskExecutionHandlers(
 
         console.log(`[Recovery] Subtasks reset: ${resetSubtaskIds.length}`, resetSubtaskIds);
 
-        // Update subtasks in SQLite
-        const storage = getTaskStorage();
+        // Update subtasks in project-local SQLite
+        const storage = getProjectTaskStorage(project.path);
         storage.updateTask(task.id, {
           status: newStatus,
           subtasks: updatedSubtasks

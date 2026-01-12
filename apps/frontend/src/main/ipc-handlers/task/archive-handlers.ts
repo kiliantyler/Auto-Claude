@@ -2,7 +2,7 @@ import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../../shared/constants';
 import type { IPCResult } from '../../../shared/types';
 import { projectStore } from '../../project-store';
-import { getTaskStorage, withTransaction } from '../../task-storage';
+import { getProjectTaskStorage, withProjectTransaction } from '../../task-storage';
 
 /**
  * Register task archive handlers
@@ -22,6 +22,12 @@ export function registerTaskArchiveHandlers(): void {
       console.warn('[IPC] TASK_ARCHIVE called with projectId:', projectId, 'taskIds:', taskIds);
 
       try {
+        // Look up project first
+        const project = projectStore.getProject(projectId);
+        if (!project) {
+          return { success: false, error: 'Project not found' };
+        }
+
         // 1. Update JSON files via project store
         const result = projectStore.archiveTasks(projectId, taskIds, version);
 
@@ -33,8 +39,8 @@ export function registerTaskArchiveHandlers(): void {
         // 2. DUAL-WRITE: Update SQLite database using transaction for atomic operation
         const archivedAt = new Date().toISOString();
         try {
-          withTransaction(() => {
-            const taskStorage = getTaskStorage();
+          withProjectTransaction(project.path, () => {
+            const taskStorage = getProjectTaskStorage(project.path);
             for (const taskId of taskIds) {
               const task = taskStorage.getTask(taskId);
               if (task) {
@@ -78,6 +84,12 @@ export function registerTaskArchiveHandlers(): void {
       console.warn('[IPC] TASK_UNARCHIVE called with projectId:', projectId, 'taskIds:', taskIds);
 
       try {
+        // Look up project first
+        const project = projectStore.getProject(projectId);
+        if (!project) {
+          return { success: false, error: 'Project not found' };
+        }
+
         // 1. Update JSON files via project store
         const result = projectStore.unarchiveTasks(projectId, taskIds);
 
@@ -88,8 +100,8 @@ export function registerTaskArchiveHandlers(): void {
 
         // 2. DUAL-WRITE: Update SQLite database using transaction for atomic operation
         try {
-          withTransaction(() => {
-            const taskStorage = getTaskStorage();
+          withProjectTransaction(project.path, () => {
+            const taskStorage = getProjectTaskStorage(project.path);
             for (const taskId of taskIds) {
               const task = taskStorage.getTask(taskId);
               if (task) {

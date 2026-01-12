@@ -1,32 +1,64 @@
 """
 Storage functionality for task logs.
+
+Uses SQLite database storage.
 """
 
 import json
-import os
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from .models import LogEntry, LogPhase
 
 
 class LogStorage:
-    """Handles persistent storage of task logs."""
+    """Handles persistent storage of task logs.
+
+    Uses SQLite database storage.
+    """
 
     LOG_FILE = "task_logs.json"
 
-    def __init__(self, spec_dir: Path):
+    def __init__(
+        self,
+        spec_dir: Path,
+        project_dir: Optional[Path] = None,
+        spec_id: Optional[str] = None
+    ):
         """
         Initialize log storage.
 
         Args:
             spec_dir: Path to the spec directory
+            project_dir: Path to project root (for SQLite storage)
+            spec_id: Spec ID (derived from spec_dir if not provided)
         """
         self.spec_dir = Path(spec_dir)
         self.log_file = self.spec_dir / self.LOG_FILE
+        self.project_dir = project_dir
+        self.spec_id = spec_id or self.spec_dir.name
+
+        # SQLite repository (lazy-loaded)
+        self._logs_repo = None
+
+        # Load existing data (JSON fallback or SQLite)
         self._data: dict = self._load_or_create()
+
+    @property
+    def logs_repo(self):
+        """Get the SQLite task logs repository (lazy-loaded)."""
+        if self._logs_repo is None and self.project_dir:
+            try:
+                from db import init_db_for_project
+                from db.repositories import TaskLogsRepository
+                db = init_db_for_project(self.project_dir)
+                self._logs_repo = TaskLogsRepository(db, self.spec_id)
+            except Exception as e:
+                print(f"[TASK_LOGS] Warning: Failed to init SQLite: {e}")
+        return self._logs_repo
 
     def _load_or_create(self) -> dict:
         """Load existing logs or create new structure."""
@@ -100,19 +132,28 @@ class LogStorage:
         Args:
             entry: The log entry to add
         """
-        phase_key = entry.phase
-        if phase_key not in self._data["phases"]:
-            # Create phase if it doesn't exist
-            self._data["phases"][phase_key] = {
-                "phase": phase_key,
-                "status": "active",
-                "started_at": self._timestamp(),
-                "completed_at": None,
-                "entries": [],
-            }
+        if not self.logs_repo:
+            raise ValueError(
+                "[TASK_LOGS] No SQLite repository available. "
+                "Ensure project_dir was provided during initialization."
+            )
 
-        self._data["phases"][phase_key]["entries"].append(entry.to_dict())
-        self.save()
+        # Map LogEntry to task_logs table format
+        details = {
+            "phase": entry.phase,
+            "session": entry.session,
+            "subtask_id": entry.subtask_id,
+            "tool_name": entry.tool_name,
+            "duration_ms": entry.duration_ms,
+        }
+        self.logs_repo.log(
+            message=entry.message,
+            log_type=entry.entry_type,
+            subtask_id=entry.subtask_id,
+            agent_name=entry.agent_name,
+            session_id=str(entry.session) if entry.session else None,
+            details=details,
+        )
 
     def update_phase_status(
         self, phase: str, status: str, completed_at: str | None = None

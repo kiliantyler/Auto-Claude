@@ -1,32 +1,29 @@
 -- ============================================
--- Auto Claude Task Storage - SQLite Schema
+-- Auto Claude - Project-Local Database Schema
 -- ============================================
 --
--- This schema defines the database structure for task and project storage,
--- replacing the JSON file-based system with SQLite for improved performance
--- and instant real-time updates via database triggers.
+-- This schema defines the PROJECT-LOCAL database structure.
+-- Each project has its own database at: <project>/.auto-claude/tasks.db
 --
--- Key Features:
--- - Tasks, projects, and metadata tables
--- - Event queue for IPC notification system
--- - Task history table for audit logging (Phase 4A)
--- - FTS5 virtual table for full-text search (Phase 4B)
--- - Undo stack table for undo/redo operations (Phase 4C)
--- - Task metrics table for analytics and reporting (Phase 4D)
--- - Indexes for query optimization (<100ms latency)
--- - Triggers for automatic event emission on data changes
--- - Triggers for automatic task history recording
--- - Triggers for FTS5 index synchronization
--- - Foreign key constraints for data integrity
+-- This database is SHARED between:
+-- - Electron frontend (via better-sqlite3)
+-- - Python backend (via sqlite3)
 --
--- Database: tasks.db
--- Location: <userData>/.auto-claude/tasks.db
+-- Contains all project-specific data:
+-- - Tasks and task history
+-- - Implementation plans, subtasks
+-- - Roadmaps, ideation, insights
+-- - File evolution and timelines
+-- - Analytics and metrics
+--
+-- Note: The global projects registry is stored separately at:
+-- <userData>/.auto-claude/app.db
 -- ============================================
 
 -- Enable foreign key constraints (must be set per connection)
 PRAGMA foreign_keys = ON;
 
--- Use WAL mode for better concurrency
+-- Use WAL mode for better concurrency (frontend + backend access)
 PRAGMA journal_mode = WAL;
 
 -- Set synchronous mode to NORMAL for good balance of safety and performance
@@ -36,24 +33,14 @@ PRAGMA synchronous = NORMAL;
 -- Core Tables
 -- ============================================
 
--- Projects Table
--- Stores project metadata and settings
-CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  path TEXT NOT NULL UNIQUE,
-  auto_build_path TEXT NOT NULL,
-  settings_json TEXT NOT NULL,  -- JSON serialized ProjectSettings
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
 -- Tasks Table
 -- Stores task records with all metadata
+-- Note: project_id is stored for reference but not as a foreign key
+-- (projects table is in the global database)
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   spec_id TEXT NOT NULL UNIQUE,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project in global DB (not a foreign key)
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'backlog',  -- 'backlog' | 'in_progress' | 'ai_review' | 'human_review' | 'done'
@@ -65,12 +52,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   specs_path TEXT,
   metadata_json TEXT,  -- JSON serialized TaskMetadata (includes subtasks, QA reports, logs, etc.)
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Metadata Table
--- Stores application-level settings and versioning
+-- Stores project-level settings and versioning
 CREATE TABLE IF NOT EXISTS metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -82,11 +68,11 @@ CREATE TABLE IF NOT EXISTS event_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_type TEXT NOT NULL,  -- 'insert' | 'update' | 'delete'
   entity_id TEXT NOT NULL,
-  entity_type TEXT NOT NULL,  -- 'task' | 'project'
+  entity_type TEXT NOT NULL,  -- 'task' | 'roadmap' | 'insight' | etc.
   timestamp TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Task History Table (Phase 4A)
+-- Task History Table
 -- Stores audit log of all task changes for history tracking
 CREATE TABLE IF NOT EXISTS task_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,7 +87,7 @@ CREATE TABLE IF NOT EXISTS task_history (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
--- Undo Stack Table (Phase 4C)
+-- Undo Stack Table
 -- Stores undo/redo operation stack per session for reversible actions
 CREATE TABLE IF NOT EXISTS undo_stack (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,11 +99,11 @@ CREATE TABLE IF NOT EXISTS undo_stack (
   description TEXT  -- Human-readable description of the operation
 );
 
--- Task Metrics Table (Phase 4D)
+-- Task Metrics Table
 -- Stores daily aggregated metrics for analytics and reporting
 CREATE TABLE IF NOT EXISTS task_metrics (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   metric_date TEXT NOT NULL,  -- Date in ISO format (YYYY-MM-DD)
   total_tasks INTEGER,
   completed_tasks INTEGER,
@@ -130,7 +116,7 @@ CREATE TABLE IF NOT EXISTS task_metrics (
 );
 
 -- ============================================
--- Full-Text Search (Phase 4B)
+-- Full-Text Search
 -- ============================================
 
 -- FTS5 Virtual Table for Task Search
@@ -145,233 +131,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
 );
 
 -- ============================================
--- Indexes for Query Optimization
--- ============================================
-
--- Tasks table indexes
-CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_location ON tasks(location);
-CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tasks_spec_id ON tasks(spec_id);
-
--- Projects table indexes
-CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
-CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at DESC);
-
--- Event queue indexes
-CREATE INDEX IF NOT EXISTS idx_event_queue_timestamp ON event_queue(timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_event_queue_entity ON event_queue(entity_type, entity_id);
-
--- Task history indexes
-CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
-CREATE INDEX IF NOT EXISTS idx_task_history_timestamp ON task_history(timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_task_history_session ON task_history(session_id);
-
--- Undo stack indexes
-CREATE INDEX IF NOT EXISTS idx_undo_stack_session ON undo_stack(session_id, sequence);
-
--- Task metrics indexes
-CREATE INDEX IF NOT EXISTS idx_task_metrics_date ON task_metrics(metric_date);
-CREATE INDEX IF NOT EXISTS idx_task_metrics_project ON task_metrics(project_id);
-
--- ============================================
--- Triggers for Event System
--- ============================================
-
--- Task INSERT trigger
--- Emits 'task:created' event when a new task is inserted
-CREATE TRIGGER IF NOT EXISTS task_inserted
-AFTER INSERT ON tasks
-BEGIN
-  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
-  VALUES ('insert', NEW.id, 'task', datetime('now'));
-END;
-
--- Task UPDATE trigger
--- Emits 'task:updated' event when a task is updated
-CREATE TRIGGER IF NOT EXISTS task_updated
-AFTER UPDATE ON tasks
-BEGIN
-  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
-  VALUES ('update', NEW.id, 'task', datetime('now'));
-
-  -- Update the updated_at timestamp
-  UPDATE tasks SET updated_at = datetime('now') WHERE id = NEW.id;
-END;
-
--- Task DELETE trigger
--- Emits 'task:deleted' event when a task is deleted
-CREATE TRIGGER IF NOT EXISTS task_deleted
-AFTER DELETE ON tasks
-BEGIN
-  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
-  VALUES ('delete', OLD.id, 'task', datetime('now'));
-END;
-
--- Project INSERT trigger
--- Emits 'project:created' event when a new project is inserted
-CREATE TRIGGER IF NOT EXISTS project_inserted
-AFTER INSERT ON projects
-BEGIN
-  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
-  VALUES ('insert', NEW.id, 'project', datetime('now'));
-END;
-
--- Project UPDATE trigger
--- Emits 'project:updated' event when a project is updated
-CREATE TRIGGER IF NOT EXISTS project_updated
-AFTER UPDATE ON projects
-BEGIN
-  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
-  VALUES ('update', NEW.id, 'project', datetime('now'));
-
-  -- Update the updated_at timestamp
-  UPDATE projects SET updated_at = datetime('now') WHERE id = NEW.id;
-END;
-
--- Project DELETE trigger
--- Emits 'project:deleted' event when a project is deleted
-CREATE TRIGGER IF NOT EXISTS project_deleted
-AFTER DELETE ON projects
-BEGIN
-  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
-  VALUES ('delete', OLD.id, 'project', datetime('now'));
-END;
-
--- ============================================
--- Triggers for Task History (Phase 4A)
--- ============================================
-
--- Task History INSERT trigger
--- Records 'created' action when a new task is inserted
-CREATE TRIGGER IF NOT EXISTS task_history_on_insert
-AFTER INSERT ON tasks
-BEGIN
-  INSERT INTO task_history (task_id, action, new_value, changed_by, session_id)
-  VALUES (
-    NEW.id,
-    'created',
-    json_object('title', NEW.title, 'status', NEW.status, 'description', NEW.description),
-    'user',
-    NULL
-  );
-END;
-
--- Task History UPDATE trigger
--- Records 'updated' or 'status_changed' action when a task is updated
-CREATE TRIGGER IF NOT EXISTS task_history_on_update
-AFTER UPDATE ON tasks
-BEGIN
-  INSERT INTO task_history (task_id, action, field_name, old_value, new_value, changed_by, session_id)
-  VALUES (
-    NEW.id,
-    CASE WHEN OLD.status != NEW.status THEN 'status_changed' ELSE 'updated' END,
-    CASE
-      WHEN OLD.status != NEW.status THEN 'status'
-      WHEN OLD.title != NEW.title THEN 'title'
-      ELSE NULL
-    END,
-    json_object('title', OLD.title, 'status', OLD.status, 'description', OLD.description),
-    json_object('title', NEW.title, 'status', NEW.status, 'description', NEW.description),
-    'user',
-    NULL
-  );
-END;
-
--- Task History DELETE trigger
--- Records 'deleted' action when a task is deleted
-CREATE TRIGGER IF NOT EXISTS task_history_on_delete
-AFTER DELETE ON tasks
-BEGIN
-  INSERT INTO task_history (task_id, action, old_value, changed_by, session_id)
-  VALUES (
-    OLD.id,
-    'deleted',
-    json_object('title', OLD.title, 'status', OLD.status, 'description', OLD.description),
-    'user',
-    NULL
-  );
-END;
-
--- ============================================
--- Triggers for FTS5 Sync (Phase 4B)
--- ============================================
-
--- FTS5 INSERT trigger
--- Syncs FTS index when a new task is inserted
-CREATE TRIGGER IF NOT EXISTS tasks_fts_insert
-AFTER INSERT ON tasks
-BEGIN
-  INSERT INTO tasks_fts(rowid, title, description, tags)
-  VALUES (
-    NEW.rowid,
-    NEW.title,
-    NEW.description,
-    json_extract(NEW.metadata_json, '$.tags')
-  );
-END;
-
--- FTS5 UPDATE trigger
--- Syncs FTS index when a task is updated
--- NOTE: FTS5 does NOT support UPDATE, so we delete old entry and insert new one
-CREATE TRIGGER IF NOT EXISTS tasks_fts_update
-AFTER UPDATE ON tasks
-BEGIN
-  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
-  VALUES (
-    'delete',
-    OLD.rowid,
-    OLD.title,
-    OLD.description,
-    json_extract(OLD.metadata_json, '$.tags')
-  );
-  INSERT INTO tasks_fts(rowid, title, description, tags)
-  VALUES (
-    NEW.rowid,
-    NEW.title,
-    NEW.description,
-    json_extract(NEW.metadata_json, '$.tags')
-  );
-END;
-
--- FTS5 DELETE trigger
--- Removes task from FTS index when task is deleted
--- NOTE: Uses special 'delete' command for contentless FTS5 tables
-CREATE TRIGGER IF NOT EXISTS tasks_fts_delete
-AFTER DELETE ON tasks
-BEGIN
-  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
-  VALUES (
-    'delete',
-    OLD.rowid,
-    OLD.title,
-    OLD.description,
-    json_extract(OLD.metadata_json, '$.tags')
-  );
-END;
-
--- ============================================
--- Initial Data
--- ============================================
-
--- ============================================
--- Project Index Table (from project_index.json)
+-- Project Index Tables
 -- ============================================
 
 -- Stores project analysis/discovery metadata
 CREATE TABLE IF NOT EXISTS project_index (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL UNIQUE,  -- Reference to project (not a foreign key)
   project_root TEXT NOT NULL,
   project_type TEXT NOT NULL,  -- 'single' | 'distributed' | 'monorepo'
   infrastructure_json TEXT,  -- JSON serialized infrastructure config
   conventions_json TEXT,  -- JSON serialized conventions
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-  UNIQUE(project_id)
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Project services (extracted from project_index.json services object)
@@ -388,26 +160,21 @@ CREATE TABLE IF NOT EXISTS project_services (
   FOREIGN KEY (project_index_id) REFERENCES project_index(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_project_index_project ON project_index(project_id);
-CREATE INDEX IF NOT EXISTS idx_project_services_index ON project_services(project_index_id);
-CREATE INDEX IF NOT EXISTS idx_project_services_language ON project_services(language);
-
 -- ============================================
--- Roadmap Tables (from roadmap/*.json)
+-- Roadmap Tables
 -- ============================================
 
 -- Roadmap metadata
 CREATE TABLE IF NOT EXISTS roadmaps (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   project_name TEXT NOT NULL,
   version TEXT,
   vision TEXT,
   target_audience_json TEXT,  -- JSON: {primary, secondary[]}
   metadata_json TEXT,  -- JSON: {created_at, updated_at, generated_by, prioritization_framework}
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Roadmap phases
@@ -453,10 +220,10 @@ CREATE TABLE IF NOT EXISTS roadmap_features (
   FOREIGN KEY (phase_id) REFERENCES roadmap_phases(id) ON DELETE SET NULL
 );
 
--- Roadmap discovery (from roadmap_discovery.json)
+-- Roadmap discovery
 CREATE TABLE IF NOT EXISTS roadmap_discovery (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   project_name TEXT NOT NULL,
   project_type TEXT,
   tech_stack_json TEXT,  -- JSON: {primary_language, frameworks[], key_dependencies[]}
@@ -465,32 +232,20 @@ CREATE TABLE IF NOT EXISTS roadmap_discovery (
   current_state_json TEXT,  -- JSON: {maturity, existing_features[], known_gaps[], technical_debt[]}
   competitive_context_json TEXT,  -- JSON: {alternatives[], differentiators[], market_position}
   constraints_json TEXT,  -- JSON: {technical[], resources[], dependencies[]}
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_roadmaps_project ON roadmaps(project_id);
-CREATE INDEX IF NOT EXISTS idx_roadmap_phases_roadmap ON roadmap_phases(roadmap_id);
-CREATE INDEX IF NOT EXISTS idx_roadmap_phases_status ON roadmap_phases(status);
-CREATE INDEX IF NOT EXISTS idx_roadmap_milestones_phase ON roadmap_milestones(phase_id);
-CREATE INDEX IF NOT EXISTS idx_roadmap_features_roadmap ON roadmap_features(roadmap_id);
-CREATE INDEX IF NOT EXISTS idx_roadmap_features_phase ON roadmap_features(phase_id);
-CREATE INDEX IF NOT EXISTS idx_roadmap_features_priority ON roadmap_features(priority);
-CREATE INDEX IF NOT EXISTS idx_roadmap_features_status ON roadmap_features(status);
-CREATE INDEX IF NOT EXISTS idx_roadmap_discovery_project ON roadmap_discovery(project_id);
-
 -- ============================================
--- Ideation Tables (from ideation/*.json)
+-- Ideation Tables
 -- ============================================
 
 -- Ideation sessions
 CREATE TABLE IF NOT EXISTS ideation_sessions (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   config_json TEXT,  -- JSON: {enabled_types[], include_roadmap_context, max_ideas_per_type}
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Ideas (from ideation sessions)
@@ -511,20 +266,14 @@ CREATE TABLE IF NOT EXISTS ideas (
   FOREIGN KEY (session_id) REFERENCES ideation_sessions(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_ideation_sessions_project ON ideation_sessions(project_id);
-CREATE INDEX IF NOT EXISTS idx_ideas_session ON ideas(session_id);
-CREATE INDEX IF NOT EXISTS idx_ideas_type ON ideas(idea_type);
-CREATE INDEX IF NOT EXISTS idx_ideas_status ON ideas(status);
-CREATE INDEX IF NOT EXISTS idx_ideas_effort ON ideas(estimated_effort);
-
 -- ============================================
--- File Evolution Tables (from file_evolution.json)
+-- File Evolution Tables
 -- ============================================
 
 -- File evolution baselines
 CREATE TABLE IF NOT EXISTS file_evolution (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   file_path TEXT NOT NULL,
   baseline_commit TEXT,
   baseline_captured_at TEXT,
@@ -532,7 +281,6 @@ CREATE TABLE IF NOT EXISTS file_evolution (
   baseline_snapshot_path TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
   UNIQUE(project_id, file_path)
 );
 
@@ -552,24 +300,18 @@ CREATE TABLE IF NOT EXISTS file_snapshots (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_file_evolution_project ON file_evolution(project_id);
-CREATE INDEX IF NOT EXISTS idx_file_evolution_path ON file_evolution(file_path);
-CREATE INDEX IF NOT EXISTS idx_file_snapshots_evolution ON file_snapshots(file_evolution_id);
-CREATE INDEX IF NOT EXISTS idx_file_snapshots_task ON file_snapshots(task_id);
-
 -- ============================================
--- File Timelines Tables (from file-timelines/*.json)
+-- File Timelines Tables
 -- ============================================
 
 -- File timelines index
 CREATE TABLE IF NOT EXISTS file_timelines (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   file_path TEXT NOT NULL,
   main_branch_history_json TEXT,  -- JSON array of commit history
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
   UNIQUE(project_id, file_path)
 );
 
@@ -593,24 +335,17 @@ CREATE TABLE IF NOT EXISTS timeline_task_views (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_file_timelines_project ON file_timelines(project_id);
-CREATE INDEX IF NOT EXISTS idx_file_timelines_path ON file_timelines(file_path);
-CREATE INDEX IF NOT EXISTS idx_timeline_task_views_timeline ON timeline_task_views(timeline_id);
-CREATE INDEX IF NOT EXISTS idx_timeline_task_views_task ON timeline_task_views(task_id);
-CREATE INDEX IF NOT EXISTS idx_timeline_task_views_status ON timeline_task_views(status);
-
 -- ============================================
--- Insight Sessions Tables (from insights/sessions/*.json)
+-- Insight Sessions Tables
 -- ============================================
 
 -- Insight sessions
 CREATE TABLE IF NOT EXISTS insight_sessions (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   title TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Session messages
@@ -624,12 +359,228 @@ CREATE TABLE IF NOT EXISTS session_messages (
   FOREIGN KEY (session_id) REFERENCES insight_sessions(id) ON DELETE CASCADE
 );
 
+-- ============================================
+-- Migration Status Table
+-- ============================================
+
+-- Tracks migration status for each data type
+CREATE TABLE IF NOT EXISTS migration_status (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  data_type TEXT NOT NULL UNIQUE,  -- 'tasks' | 'project_index' | 'roadmap' | 'ideation' | 'file_evolution' | 'file_timelines' | 'insights'
+  migrated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  version TEXT NOT NULL DEFAULT '1.0',
+  files_migrated_json TEXT  -- JSON array of migrated file paths
+);
+
+-- ============================================
+-- Indexes for Query Optimization
+-- ============================================
+
+-- Tasks table indexes
+CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_location ON tasks(location);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_spec_id ON tasks(spec_id);
+
+-- Event queue indexes
+CREATE INDEX IF NOT EXISTS idx_event_queue_timestamp ON event_queue(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_queue_entity ON event_queue(entity_type, entity_id);
+
+-- Task history indexes
+CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_history_timestamp ON task_history(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_task_history_session ON task_history(session_id);
+
+-- Undo stack indexes
+CREATE INDEX IF NOT EXISTS idx_undo_stack_session ON undo_stack(session_id, sequence);
+
+-- Task metrics indexes
+CREATE INDEX IF NOT EXISTS idx_task_metrics_date ON task_metrics(metric_date);
+CREATE INDEX IF NOT EXISTS idx_task_metrics_project ON task_metrics(project_id);
+
+-- Project index indexes
+CREATE INDEX IF NOT EXISTS idx_project_index_project ON project_index(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_services_index ON project_services(project_index_id);
+CREATE INDEX IF NOT EXISTS idx_project_services_language ON project_services(language);
+
+-- Roadmap indexes
+CREATE INDEX IF NOT EXISTS idx_roadmaps_project ON roadmaps(project_id);
+CREATE INDEX IF NOT EXISTS idx_roadmap_phases_roadmap ON roadmap_phases(roadmap_id);
+CREATE INDEX IF NOT EXISTS idx_roadmap_phases_status ON roadmap_phases(status);
+CREATE INDEX IF NOT EXISTS idx_roadmap_milestones_phase ON roadmap_milestones(phase_id);
+CREATE INDEX IF NOT EXISTS idx_roadmap_features_roadmap ON roadmap_features(roadmap_id);
+CREATE INDEX IF NOT EXISTS idx_roadmap_features_phase ON roadmap_features(phase_id);
+CREATE INDEX IF NOT EXISTS idx_roadmap_features_priority ON roadmap_features(priority);
+CREATE INDEX IF NOT EXISTS idx_roadmap_features_status ON roadmap_features(status);
+CREATE INDEX IF NOT EXISTS idx_roadmap_discovery_project ON roadmap_discovery(project_id);
+
+-- Ideation indexes
+CREATE INDEX IF NOT EXISTS idx_ideation_sessions_project ON ideation_sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_ideas_session ON ideas(session_id);
+CREATE INDEX IF NOT EXISTS idx_ideas_type ON ideas(idea_type);
+CREATE INDEX IF NOT EXISTS idx_ideas_status ON ideas(status);
+CREATE INDEX IF NOT EXISTS idx_ideas_effort ON ideas(estimated_effort);
+
+-- File evolution indexes
+CREATE INDEX IF NOT EXISTS idx_file_evolution_project ON file_evolution(project_id);
+CREATE INDEX IF NOT EXISTS idx_file_evolution_path ON file_evolution(file_path);
+CREATE INDEX IF NOT EXISTS idx_file_snapshots_evolution ON file_snapshots(file_evolution_id);
+CREATE INDEX IF NOT EXISTS idx_file_snapshots_task ON file_snapshots(task_id);
+
+-- File timelines indexes
+CREATE INDEX IF NOT EXISTS idx_file_timelines_project ON file_timelines(project_id);
+CREATE INDEX IF NOT EXISTS idx_file_timelines_path ON file_timelines(file_path);
+CREATE INDEX IF NOT EXISTS idx_timeline_task_views_timeline ON timeline_task_views(timeline_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_task_views_task ON timeline_task_views(task_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_task_views_status ON timeline_task_views(status);
+
+-- Insight sessions indexes
 CREATE INDEX IF NOT EXISTS idx_insight_sessions_project ON insight_sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp ON session_messages(timestamp DESC);
 
+-- Migration status indexes
+CREATE INDEX IF NOT EXISTS idx_migration_status_type ON migration_status(data_type);
+
 -- ============================================
--- FTS5 for Insight Sessions (searchable messages)
+-- Triggers for Event System
+-- ============================================
+
+-- Task INSERT trigger
+CREATE TRIGGER IF NOT EXISTS task_inserted
+AFTER INSERT ON tasks
+BEGIN
+  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
+  VALUES ('insert', NEW.id, 'task', datetime('now'));
+END;
+
+-- Task UPDATE trigger
+CREATE TRIGGER IF NOT EXISTS task_updated
+AFTER UPDATE ON tasks
+BEGIN
+  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
+  VALUES ('update', NEW.id, 'task', datetime('now'));
+
+  -- Update the updated_at timestamp
+  UPDATE tasks SET updated_at = datetime('now') WHERE id = NEW.id;
+END;
+
+-- Task DELETE trigger
+CREATE TRIGGER IF NOT EXISTS task_deleted
+AFTER DELETE ON tasks
+BEGIN
+  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
+  VALUES ('delete', OLD.id, 'task', datetime('now'));
+END;
+
+-- ============================================
+-- Triggers for Task History
+-- ============================================
+
+-- Task History INSERT trigger
+CREATE TRIGGER IF NOT EXISTS task_history_on_insert
+AFTER INSERT ON tasks
+BEGIN
+  INSERT INTO task_history (task_id, action, new_value, changed_by, session_id)
+  VALUES (
+    NEW.id,
+    'created',
+    json_object('title', NEW.title, 'status', NEW.status, 'description', NEW.description),
+    'user',
+    NULL
+  );
+END;
+
+-- Task History UPDATE trigger
+CREATE TRIGGER IF NOT EXISTS task_history_on_update
+AFTER UPDATE ON tasks
+BEGIN
+  INSERT INTO task_history (task_id, action, field_name, old_value, new_value, changed_by, session_id)
+  VALUES (
+    NEW.id,
+    CASE WHEN OLD.status != NEW.status THEN 'status_changed' ELSE 'updated' END,
+    CASE
+      WHEN OLD.status != NEW.status THEN 'status'
+      WHEN OLD.title != NEW.title THEN 'title'
+      ELSE NULL
+    END,
+    json_object('title', OLD.title, 'status', OLD.status, 'description', OLD.description),
+    json_object('title', NEW.title, 'status', NEW.status, 'description', NEW.description),
+    'user',
+    NULL
+  );
+END;
+
+-- Task History DELETE trigger
+CREATE TRIGGER IF NOT EXISTS task_history_on_delete
+AFTER DELETE ON tasks
+BEGIN
+  INSERT INTO task_history (task_id, action, old_value, changed_by, session_id)
+  VALUES (
+    OLD.id,
+    'deleted',
+    json_object('title', OLD.title, 'status', OLD.status, 'description', OLD.description),
+    'user',
+    NULL
+  );
+END;
+
+-- ============================================
+-- Triggers for FTS5 Sync
+-- ============================================
+
+-- FTS5 INSERT trigger
+CREATE TRIGGER IF NOT EXISTS tasks_fts_insert
+AFTER INSERT ON tasks
+BEGIN
+  INSERT INTO tasks_fts(rowid, title, description, tags)
+  VALUES (
+    NEW.rowid,
+    NEW.title,
+    NEW.description,
+    json_extract(NEW.metadata_json, '$.tags')
+  );
+END;
+
+-- FTS5 UPDATE trigger
+CREATE TRIGGER IF NOT EXISTS tasks_fts_update
+AFTER UPDATE ON tasks
+BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
+  VALUES (
+    'delete',
+    OLD.rowid,
+    OLD.title,
+    OLD.description,
+    json_extract(OLD.metadata_json, '$.tags')
+  );
+  INSERT INTO tasks_fts(rowid, title, description, tags)
+  VALUES (
+    NEW.rowid,
+    NEW.title,
+    NEW.description,
+    json_extract(NEW.metadata_json, '$.tags')
+  );
+END;
+
+-- FTS5 DELETE trigger
+CREATE TRIGGER IF NOT EXISTS tasks_fts_delete
+AFTER DELETE ON tasks
+BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
+  VALUES (
+    'delete',
+    OLD.rowid,
+    OLD.title,
+    OLD.description,
+    json_extract(OLD.metadata_json, '$.tags')
+  );
+END;
+
+-- ============================================
+-- FTS5 for Insight Sessions
 -- ============================================
 
 CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
@@ -663,28 +614,11 @@ BEGIN
 END;
 
 -- ============================================
--- Migration Status Table
--- ============================================
-
--- Tracks migration status per project for each data type
-CREATE TABLE IF NOT EXISTS migration_status (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_path TEXT NOT NULL,
-  data_type TEXT NOT NULL,  -- 'tasks' | 'project_index' | 'roadmap' | 'ideation' | 'file_evolution' | 'file_timelines' | 'insights'
-  migrated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  version TEXT NOT NULL DEFAULT '1.0',
-  files_migrated_json TEXT,  -- JSON array of migrated file paths
-  UNIQUE(project_path, data_type)
-);
-
-CREATE INDEX IF NOT EXISTS idx_migration_status_project ON migration_status(project_path);
-CREATE INDEX IF NOT EXISTS idx_migration_status_type ON migration_status(data_type);
-
--- ============================================
 -- Initial Data
 -- ============================================
 
 -- Schema version metadata
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '004');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '005');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_type', 'project-local');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('last_migration', datetime('now'));

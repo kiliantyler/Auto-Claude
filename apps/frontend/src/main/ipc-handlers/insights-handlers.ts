@@ -6,7 +6,7 @@ import { IPC_CHANNELS, getSpecsDir, AUTO_BUILD_PATHS } from '../../shared/consta
 import type { IPCResult, InsightsSession, InsightsSessionSummary, InsightsModelConfig, Task, TaskMetadata } from '../../shared/types';
 import { projectStore } from '../project-store';
 import { insightsService } from '../insights-service';
-import { getTaskStorage } from '../task-storage';
+import { getProjectTaskStorage } from '../task-storage';
 
 /**
  * Register all insights-related IPC handlers
@@ -158,7 +158,7 @@ export function registerInsightsHandlers(
 
         // Write to SQLite database (primary storage)
         try {
-          const taskStorage = getTaskStorage();
+          const taskStorage = getProjectTaskStorage(project.path);
           taskStorage.createTask(task);
           console.warn(`[INSIGHTS_CREATE_TASK] Created task in SQLite: ${specId}`);
         } catch (dbErr) {

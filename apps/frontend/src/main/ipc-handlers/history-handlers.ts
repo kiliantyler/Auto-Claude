@@ -23,6 +23,7 @@ import type {
   RecentActivityItem,
 } from '../../shared/types';
 import { getHistoryService } from '../history-service';
+import { projectStore } from '../project-store';
 
 // IPC channel names for history operations
 export const HISTORY_CHANNELS = {
@@ -34,6 +35,18 @@ export const HISTORY_CHANNELS = {
   QUERY: 'history:query',
   GET_TASK_HISTORY_COUNT: 'history:get-task-history-count',
 } as const;
+
+/**
+ * Helper to get project path from projectId
+ */
+function getProjectPath(projectId: string): string | null {
+  const project = projectStore.getProject(projectId);
+  if (!project) {
+    console.warn(`[History Handlers] Project not found: ${projectId}`);
+    return null;
+  }
+  return project.path;
+}
 
 /**
  * Register history IPC handlers
@@ -68,6 +81,7 @@ export function registerHistoryHandlers(): void {
   /**
    * Get full history for a specific task
    *
+   * @param projectId - Project ID (required)
    * @param taskId - Task ID to get history for
    * @param options - Optional query options (limit, offset)
    * @returns HistoryQueryResult with entries and pagination info
@@ -76,18 +90,28 @@ export function registerHistoryHandlers(): void {
     HISTORY_CHANNELS.GET_TASK_HISTORY,
     async (
       _,
+      projectId: string,
       taskId: string,
       options?: { limit?: number; offset?: number }
     ): Promise<IPCResult<HistoryQueryResult>> => {
       console.log('[History Handlers] GET_TASK_HISTORY called for task:', taskId);
 
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
+
       if (!taskId) {
         return { success: false, error: 'Task ID is required' };
       }
 
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
+
       try {
         const service = getHistoryService();
-        const result = service.getTaskHistory(taskId, options);
+        const result = service.getTaskHistory(projectPath, taskId, options);
         console.log(
           '[History Handlers] GET_TASK_HISTORY returning',
           result.entries.length,
@@ -105,8 +129,9 @@ export function registerHistoryHandlers(): void {
   );
 
   /**
-   * Get recent changes across all tasks
+   * Get recent changes across all tasks in a project
    *
+   * @param projectId - Project ID (required)
    * @param limit - Maximum number of entries to return (default 50)
    * @param options - Optional filters (action type, date range)
    * @returns Array of history entries with task info
@@ -115,14 +140,24 @@ export function registerHistoryHandlers(): void {
     HISTORY_CHANNELS.GET_RECENT,
     async (
       _,
+      projectId: string,
       limit: number = 50,
       options?: HistoryQueryOptions
     ): Promise<IPCResult<RecentActivityItem[]>> => {
       console.log('[History Handlers] GET_RECENT called with limit:', limit);
 
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
+
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
+
       try {
         const service = getHistoryService();
-        const entries = service.getRecentChanges(limit, options);
+        const entries = service.getRecentChanges(projectPath, limit, options);
         console.log('[History Handlers] GET_RECENT returning', entries.length, 'entries');
         return { success: true, data: entries };
       } catch (error) {
@@ -140,21 +175,31 @@ export function registerHistoryHandlers(): void {
    *
    * Sessions group related changes that were made together (e.g., during a single edit session).
    *
+   * @param projectId - Project ID (required)
    * @param sessionId - Session ID to get changes for
    * @returns SessionHistoryGroup with all changes in the session, or null if not found
    */
   ipcMain.handle(
     HISTORY_CHANNELS.GET_SESSION,
-    async (_, sessionId: string): Promise<IPCResult<SessionHistoryGroup | null>> => {
+    async (_, projectId: string, sessionId: string): Promise<IPCResult<SessionHistoryGroup | null>> => {
       console.log('[History Handlers] GET_SESSION called for session:', sessionId);
+
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
 
       if (!sessionId) {
         return { success: false, error: 'Session ID is required' };
       }
 
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
+
       try {
         const service = getHistoryService();
-        const sessionGroup = service.getSessionChanges(sessionId);
+        const sessionGroup = service.getSessionChanges(projectPath, sessionId);
         console.log(
           '[History Handlers] GET_SESSION returning',
           sessionGroup?.entries.length ?? 0,
@@ -176,6 +221,7 @@ export function registerHistoryHandlers(): void {
    *
    * Useful for displaying a session picker in the UI.
    *
+   * @param projectId - Project ID (required)
    * @param limit - Maximum number of sessions to return (default 20)
    * @returns Array of session info objects
    */
@@ -183,13 +229,23 @@ export function registerHistoryHandlers(): void {
     HISTORY_CHANNELS.GET_RECENT_SESSIONS,
     async (
       _,
+      projectId: string,
       limit: number = 20
     ): Promise<IPCResult<{ sessionId: string; entryCount: number; lastActivity: string }[]>> => {
       console.log('[History Handlers] GET_RECENT_SESSIONS called with limit:', limit);
 
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
+
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
+
       try {
         const service = getHistoryService();
-        const sessions = service.getRecentSessions(limit);
+        const sessions = service.getRecentSessions(projectPath, limit);
         console.log('[History Handlers] GET_RECENT_SESSIONS returning', sessions.length, 'sessions');
         return { success: true, data: sessions };
       } catch (error) {
@@ -205,17 +261,27 @@ export function registerHistoryHandlers(): void {
   /**
    * Query history with flexible filters
    *
+   * @param projectId - Project ID (required)
    * @param options - Query options with filters and pagination
    * @returns HistoryQueryResult with entries and pagination info
    */
   ipcMain.handle(
     HISTORY_CHANNELS.QUERY,
-    async (_, options: HistoryQueryOptions): Promise<IPCResult<HistoryQueryResult>> => {
+    async (_, projectId: string, options: HistoryQueryOptions): Promise<IPCResult<HistoryQueryResult>> => {
       console.log('[History Handlers] QUERY called with options:', options);
+
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
+
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
 
       try {
         const service = getHistoryService();
-        const result = service.queryHistory(options || {});
+        const result = service.queryHistory(projectPath, options || {});
         console.log('[History Handlers] QUERY returning', result.entries.length, 'entries');
         return { success: true, data: result };
       } catch (error) {
@@ -231,21 +297,31 @@ export function registerHistoryHandlers(): void {
   /**
    * Get the count of history entries for a task
    *
+   * @param projectId - Project ID (required)
    * @param taskId - Task ID to count history for
    * @returns Number of history entries
    */
   ipcMain.handle(
     HISTORY_CHANNELS.GET_TASK_HISTORY_COUNT,
-    async (_, taskId: string): Promise<IPCResult<number>> => {
+    async (_, projectId: string, taskId: string): Promise<IPCResult<number>> => {
       console.log('[History Handlers] GET_TASK_HISTORY_COUNT called for task:', taskId);
+
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
 
       if (!taskId) {
         return { success: false, error: 'Task ID is required' };
       }
 
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
+
       try {
         const service = getHistoryService();
-        const count = service.getTaskHistoryCount(taskId);
+        const count = service.getTaskHistoryCount(projectPath, taskId);
         console.log('[History Handlers] GET_TASK_HISTORY_COUNT returning:', count);
         return { success: true, data: count };
       } catch (error) {

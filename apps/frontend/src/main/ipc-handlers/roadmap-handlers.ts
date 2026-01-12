@@ -8,7 +8,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 
 import { projectStore } from '../project-store';
 import { AgentManager } from '../agent';
 import { debugLog, debugError } from '../../shared/utils/debug-logger';
-import { getTaskStorage } from '../task-storage';
+import { getProjectTaskStorage } from '../task-storage';
 
 /**
  * Read feature settings from the settings file
@@ -559,7 +559,7 @@ ${(feature.acceptance_criteria || []).map((c: string) => `- [ ] ${c}`).join('\n'
 
         // Write to SQLite database (primary storage)
         try {
-          const taskStorage = getTaskStorage();
+          const taskStorage = getProjectTaskStorage(project.path);
           taskStorage.createTask(task);
           console.warn(`[ROADMAP_CONVERT] Created task in SQLite: ${specId}`);
         } catch (dbErr) {

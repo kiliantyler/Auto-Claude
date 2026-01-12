@@ -6,7 +6,7 @@ import type { Project, ProjectSettings, Task, TaskStatus, TaskMetadata, Implemen
 import { DEFAULT_PROJECT_SETTINGS, AUTO_BUILD_PATHS, getSpecsDir } from '../shared/constants';
 import { getAutoBuildPath, isInitialized } from './project-initializer';
 import { getTaskWorktreeDir } from './worktree-paths';
-import { getDatabaseConnection } from './database';
+import { getGlobalDatabase, getProjectDatabaseManager } from './database';
 import { getMigrationTracker } from './migration-tracker';
 import { getMigrationWorker } from './migration-worker';
 
@@ -35,10 +35,9 @@ export class ProjectStore {
   private data: StoreData;
   private tasksCache: Map<string, TasksCacheEntry> = new Map();
   private readonly CACHE_TTL_MS = 3000; // 3 seconds TTL for task cache
-  private readonly ENABLE_DUAL_WRITE: boolean;
 
   constructor() {
-    // Store in app's userData directory
+    // Store in app's userData directory (for legacy JSON fallback)
     const userDataPath = app.getPath('userData');
     const storeDir = path.join(userDataPath, 'store');
 
@@ -49,11 +48,7 @@ export class ProjectStore {
 
     this.storePath = path.join(storeDir, 'projects.json');
     this.data = this.load();
-
-    // Disable dual-write by default (Phase 4 - SQLite-only mode)
-    // Set ENABLE_DUAL_WRITE=true to enable dual-write for debugging
-    this.ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE === 'true';
-    console.log(`[ProjectStore] Dual-write mode: ${this.ENABLE_DUAL_WRITE ? 'ENABLED' : 'DISABLED'}`);
+    console.log('[ProjectStore] Initialized (SQLite-only mode)');
   }
 
   /**
@@ -91,7 +86,7 @@ export class ProjectStore {
    */
   private writeProjectToDatabase(project: Project): void {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
       const stmt = db.prepare(`
         INSERT OR REPLACE INTO projects (id, name, path, auto_build_path, settings_json, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -118,7 +113,7 @@ export class ProjectStore {
    */
   private deleteProjectFromDatabase(projectId: string): void {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
       const stmt = db.prepare('DELETE FROM projects WHERE id = ?');
       stmt.run(projectId);
     } catch (error) {
@@ -133,7 +128,7 @@ export class ProjectStore {
    */
   private readProjectsFromDatabase(): Project[] {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
       const stmt = db.prepare('SELECT * FROM projects ORDER BY updated_at DESC');
       const rows = stmt.all() as Array<{
         id: string;
@@ -221,13 +216,8 @@ export class ProjectStore {
         existing.autoBuildPath = '';
         existing.updatedAt = new Date();
 
-        // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
-        if (this.ENABLE_DUAL_WRITE) {
-          this.save();
-          this.writeProjectToDatabase(existing);
-        } else {
-          this.writeProjectToDatabase(existing);
-        }
+        // Write to SQLite database
+        this.writeProjectToDatabase(existing);
       }
       return existing;
     }
@@ -248,14 +238,9 @@ export class ProjectStore {
       updatedAt: new Date()
     };
 
-    // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
+    // Write to SQLite database
     this.data.projects.push(project);
-    if (this.ENABLE_DUAL_WRITE) {
-      this.save();
-      this.writeProjectToDatabase(project);
-    } else {
-      this.writeProjectToDatabase(project);
-    }
+    this.writeProjectToDatabase(project);
 
     return project;
   }
@@ -269,13 +254,8 @@ export class ProjectStore {
       project.autoBuildPath = autoBuildPath;
       project.updatedAt = new Date();
 
-      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
-      if (this.ENABLE_DUAL_WRITE) {
-        this.save();
-        this.writeProjectToDatabase(project);
-      } else {
-        this.writeProjectToDatabase(project);
-      }
+      // Write to SQLite database
+      this.writeProjectToDatabase(project);
     }
     return project;
   }
@@ -288,13 +268,8 @@ export class ProjectStore {
     if (index !== -1) {
       this.data.projects.splice(index, 1);
 
-      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
-      if (this.ENABLE_DUAL_WRITE) {
-        this.save();
-        this.deleteProjectFromDatabase(projectId);
-      } else {
-        this.deleteProjectFromDatabase(projectId);
-      }
+      // Write to SQLite database
+      this.deleteProjectFromDatabase(projectId);
       return true;
     }
     return false;
@@ -302,24 +277,25 @@ export class ProjectStore {
 
   /**
    * Get all projects
-   * Reads from SQLite database (with fallback to JSON for safety during migration)
+   * Reads from SQLite database
    */
   getProjects(): Project[] {
-    if (this.ENABLE_DUAL_WRITE) {
-      // Phase 1: Read from SQLite with fallback to JSON
-      const dbProjects = this.readProjectsFromDatabase();
-      if (dbProjects.length > 0) {
-        // Update in-memory cache with database data for consistency
-        this.data.projects = dbProjects;
-        return dbProjects;
+    const dbProjects = this.readProjectsFromDatabase();
+    if (dbProjects.length > 0) {
+      // Update in-memory cache with database data for consistency
+      this.data.projects = dbProjects;
+      return dbProjects;
+    }
+    // Fallback to JSON if database is empty (migration case)
+    if (this.data.projects.length > 0) {
+      console.log('[ProjectStore] Database is empty, migrating from JSON');
+      // Migrate each project to database
+      for (const project of this.data.projects) {
+        this.writeProjectToDatabase(project);
       }
-      // Fallback to JSON if database is empty or has errors
-      console.warn('[ProjectStore] Database is empty, falling back to JSON');
-      return this.data.projects;
-    } else {
-      // Phase 2+: JSON files are still maintained as backup
       return this.data.projects;
     }
+    return [];
   }
 
   /**
@@ -384,11 +360,6 @@ export class ProjectStore {
     }
 
     if (hasChanges) {
-      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
-      if (this.ENABLE_DUAL_WRITE) {
-        this.save();
-      }
-
       // Update all modified projects in database
       for (const projectId of resetProjectIds) {
         const project = this.data.projects.find((p) => p.id === projectId);
@@ -422,24 +393,21 @@ export class ProjectStore {
       project.settings = { ...project.settings, ...settings };
       project.updatedAt = new Date();
 
-      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
-      if (this.ENABLE_DUAL_WRITE) {
-        this.save();
-        this.writeProjectToDatabase(project);
-      } else {
-        this.writeProjectToDatabase(project);
-      }
+      // Write to SQLite database
+      this.writeProjectToDatabase(project);
     }
     return project;
   }
 
   /**
-   * Read tasks from SQLite database
+   * Read tasks from project-local SQLite database
    * Used by read operations to query database instead of scanning directories
    */
-  private readTasksFromDatabase(projectId: string): Task[] {
+  private readTasksFromDatabase(projectId: string, projectPath: string): Task[] {
     try {
-      const db = getDatabaseConnection().getConnection();
+      // Use project-local database for tasks
+      const projectDb = getProjectDatabaseManager().getConnection(projectPath);
+      const db = projectDb.getConnection();
       const stmt = db.prepare('SELECT * FROM tasks WHERE project_id = ? ORDER BY updated_at DESC');
       const rows = stmt.all(projectId) as Array<{
         id: string;
@@ -534,9 +502,9 @@ export class ProjectStore {
       });
     });
 
-    // Read tasks from SQLite database (single source of truth)
-    const tasks = this.readTasksFromDatabase(projectId);
-    console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from SQLite database');
+    // Read tasks from project-local SQLite database (single source of truth)
+    const tasks = this.readTasksFromDatabase(projectId, project.path);
+    console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from project-local SQLite database');
 
     // Update cache
     this.tasksCache.set(projectId, { tasks, timestamp: now });
@@ -1026,7 +994,9 @@ export class ProjectStore {
     let hasErrors = false;
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      // Use project-local database for tasks
+      const projectDb = getProjectDatabaseManager().getConnection(project.path);
+      const db = projectDb.getConnection();
 
       for (const taskId of taskIds) {
         try {
@@ -1082,7 +1052,9 @@ export class ProjectStore {
     let hasErrors = false;
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      // Use project-local database for tasks
+      const projectDb = getProjectDatabaseManager().getConnection(project.path);
+      const db = projectDb.getConnection();
 
       for (const taskId of taskIds) {
         try {

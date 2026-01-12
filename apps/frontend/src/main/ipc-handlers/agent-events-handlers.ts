@@ -13,7 +13,7 @@ import { titleGenerator } from '../title-generator';
 import { projectStore } from '../project-store';
 import { notificationService } from '../notification-service';
 import { findTaskAndProject } from './task/shared';
-import { getTaskStorage } from '../task-storage';
+import { getProjectTaskStorage } from '../task-storage';
 
 
 /**
@@ -104,7 +104,7 @@ export function registerAgenteventsHandlers(
           // Persist status to SQLite database
           const persistStatus = (status: TaskStatus) => {
             try {
-              const storage = getTaskStorage();
+              const storage = getProjectTaskStorage(project!.path);
               storage.updateTask(task!.id, { status });
               projectStore.invalidateTasksCache(projectId);
               console.warn(`[Task ${taskId}] Persisted status to database: ${status}`);
@@ -184,7 +184,7 @@ export function registerAgenteventsHandlers(
 
         // Persist status and execution progress to SQLite database
         try {
-          const storage = getTaskStorage();
+          const storage = getProjectTaskStorage(project.path);
           const executionProgress: ExecutionProgress = {
             phase: progress.phase,
             phaseProgress: progress.phaseProgress || 0,

@@ -10,16 +10,13 @@ import { AgentManager } from '../../agent';
 import { findTaskAndProject } from './shared';
 import { findTaskWorktree } from '../../worktree-paths';
 import { getToolPath } from '../../cli-tool-manager';
-import { getTaskStorage } from '../../task-storage';
+import { getProjectTaskStorage } from '../../task-storage';
 
 /**
  * Register task CRUD (Create, Read, Update, Delete) handlers
  */
 export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
-  // Dual-write mode disabled by default (Phase 4 - SQLite-only mode)
-  // Set ENABLE_DUAL_WRITE=true to enable dual-write for debugging
-  const ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE === 'true';
-  console.log(`[CRUD Handlers] Dual-write mode: ${ENABLE_DUAL_WRITE ? 'ENABLED' : 'DISABLED'}`);
+  console.log('[CRUD Handlers] Initialized (SQLite-only mode)');
 
   /**
    * List all tasks for a project
@@ -120,84 +117,38 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
         ...metadata
       };
 
-      // DUAL-WRITE: Write JSON files only if enabled (Phase 1)
-      // When ENABLE_DUAL_WRITE=false (Phase 4), skip JSON writes and use SQLite-only
-      if (ENABLE_DUAL_WRITE) {
-        // Process and save attached images
-        if (taskMetadata.attachedImages && taskMetadata.attachedImages.length > 0) {
-          const attachmentsDir = path.join(specDir, 'attachments');
-          mkdirSync(attachmentsDir, { recursive: true });
+      // Process and save attached images to filesystem
+      if (taskMetadata.attachedImages && taskMetadata.attachedImages.length > 0) {
+        const attachmentsDir = path.join(specDir, 'attachments');
+        mkdirSync(attachmentsDir, { recursive: true });
 
-          const savedImages: typeof taskMetadata.attachedImages = [];
+        const savedImages: typeof taskMetadata.attachedImages = [];
 
-          for (const image of taskMetadata.attachedImages) {
-            if (image.data) {
-              try {
-                // Decode base64 and save to file
-                const buffer = Buffer.from(image.data, 'base64');
-                const imagePath = path.join(attachmentsDir, image.filename);
-                writeFileSync(imagePath, buffer);
+        for (const image of taskMetadata.attachedImages) {
+          if (image.data) {
+            try {
+              // Decode base64 and save to file
+              const buffer = Buffer.from(image.data, 'base64');
+              const imagePath = path.join(attachmentsDir, image.filename);
+              writeFileSync(imagePath, buffer);
 
-                // Store relative path instead of base64 data
-                savedImages.push({
-                  id: image.id,
-                  filename: image.filename,
-                  mimeType: image.mimeType,
-                  size: image.size,
-                  path: `attachments/${image.filename}`
-                  // Don't include data or thumbnail to save space
-                });
-              } catch (err) {
-                console.error(`Failed to save image ${image.filename}:`, err);
-              }
+              // Store relative path instead of base64 data
+              savedImages.push({
+                id: image.id,
+                filename: image.filename,
+                mimeType: image.mimeType,
+                size: image.size,
+                path: `attachments/${image.filename}`
+                // Don't include data or thumbnail to save space
+              });
+            } catch (err) {
+              console.error(`Failed to save image ${image.filename}:`, err);
             }
           }
-
-          // Update metadata with saved image paths (without base64 data)
-          taskMetadata.attachedImages = savedImages;
         }
 
-        // Create initial implementation_plan.json (task is created but not started)
-        const now = new Date().toISOString();
-        const implementationPlan = {
-          feature: finalTitle,
-          description: description,
-          created_at: now,
-          updated_at: now,
-          status: 'pending',
-          phases: []
-        };
-
-        const planPath = path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
-        writeFileSync(planPath, JSON.stringify(implementationPlan, null, 2));
-
-        // Save task metadata if provided
-        if (taskMetadata) {
-          const metadataPath = path.join(specDir, 'task_metadata.json');
-          writeFileSync(metadataPath, JSON.stringify(taskMetadata, null, 2));
-        }
-
-        // Create requirements.json with attached images
-        const requirements: Record<string, unknown> = {
-          task_description: description,
-          workflow_type: taskMetadata.category || 'feature'
-        };
-
-        // Add attached images to requirements if present
-        if (taskMetadata.attachedImages && taskMetadata.attachedImages.length > 0) {
-          requirements.attached_images = taskMetadata.attachedImages.map(img => ({
-            filename: img.filename,
-            path: img.path,
-            description: '' // User can add descriptions later
-          }));
-        }
-
-        const requirementsPath = path.join(specDir, AUTO_BUILD_PATHS.REQUIREMENTS);
-        writeFileSync(requirementsPath, JSON.stringify(requirements, null, 2));
-
-        console.log(`[TASK_CREATE] Written JSON files to: ${specDir}`);
-      } else {
-        console.log(`[TASK_CREATE] Skipped JSON file writes (SQLite-only mode enabled)`);
+        // Update metadata with saved image paths (without base64 data)
+        taskMetadata.attachedImages = savedImages;
       }
 
       // Create the task object
@@ -215,23 +166,17 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
         updatedAt: new Date()
       };
 
-      // Write to SQLite database (primary storage)
+      // Write to project-local SQLite database
       try {
-        const taskStorage = getTaskStorage();
+        const taskStorage = getProjectTaskStorage(project.path);
         taskStorage.createTask(task);
-        console.warn(`[TASK_CREATE] Written to SQLite database: ${task.id}`);
+        console.warn(`[TASK_CREATE] Written to project-local database: ${task.id}`);
       } catch (dbError) {
         console.error('[TASK_CREATE] Failed to write to SQLite:', dbError);
-        // If dual-write is enabled, JSON files are already written as backup
-        if (ENABLE_DUAL_WRITE) {
-          console.warn('[TASK_CREATE] Continuing with JSON-only (dual-write mode)');
-        } else {
-          // In SQLite-only mode, database write failure is critical
-          return {
-            success: false,
-            error: dbError instanceof Error ? dbError.message : 'Failed to create task in database'
-          };
-        }
+        return {
+          success: false,
+          error: dbError instanceof Error ? dbError.message : 'Failed to create task in database'
+        };
       }
 
       // Invalidate cache since a new task was created
@@ -400,12 +345,12 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
           console.warn(`[TASK_DELETE] Deleted additional spec path: ${task.specsPath}`);
         }
 
-        // 6. DUAL-WRITE: Delete from SQLite database (Phase 1 migration)
+        // Delete from project-local SQLite database
         // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
-          const taskStorage = getTaskStorage();
+          const taskStorage = getProjectTaskStorage(project.path);
           taskStorage.deleteTask(task.id);
-          console.warn(`[TASK_DELETE] Deleted from SQLite database: ${task.id}`);
+          console.warn(`[TASK_DELETE] Deleted from project-local database: ${task.id}`);
         } catch (dbError) {
           console.error('[TASK_DELETE] Failed to delete from SQLite (continuing):', dbError);
           // Continue - JSON files are already deleted
@@ -446,11 +391,6 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
         const autoBuildDir = project.autoBuildPath || '.auto-claude';
         const specDir = path.join(project.path, autoBuildDir, 'specs', task.specId);
 
-        // In SQLite-only mode, spec directory may not exist (skip check)
-        if (ENABLE_DUAL_WRITE && !existsSync(specDir)) {
-          return { success: false, error: 'Spec directory not found' };
-        }
-
         // Auto-generate title if empty
         let finalTitle = updates.title;
         if (updates.title !== undefined && !updates.title.trim()) {
@@ -476,131 +416,43 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
           }
         }
 
-        // DUAL-WRITE: Update JSON files only if enabled (Phase 1)
-        // When ENABLE_DUAL_WRITE=false (Phase 4), skip JSON writes and use SQLite-only
-        if (ENABLE_DUAL_WRITE) {
-          // Update implementation_plan.json
-          const planPath = path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
-          if (existsSync(planPath)) {
-            try {
-              const planContent = readFileSync(planPath, 'utf-8');
-              const plan = JSON.parse(planContent);
-
-              if (finalTitle !== undefined) {
-                plan.feature = finalTitle;
-              }
-              if (updates.description !== undefined) {
-                plan.description = updates.description;
-              }
-              plan.updated_at = new Date().toISOString();
-
-              writeFileSync(planPath, JSON.stringify(plan, null, 2));
-            } catch {
-              // Plan file might not be valid JSON, continue anyway
-            }
-          }
-
-          // Update spec.md if it exists
-          const specPath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
-          if (existsSync(specPath)) {
-            try {
-              let specContent = readFileSync(specPath, 'utf-8');
-
-              // Update title (first # heading)
-              if (finalTitle !== undefined) {
-                specContent = specContent.replace(
-                  /^#\s+.*$/m,
-                  `# ${finalTitle}`
-                );
-              }
-
-              // Update description (## Overview section content)
-              if (updates.description !== undefined) {
-                // Replace content between ## Overview and the next ## section
-                specContent = specContent.replace(
-                  /(## Overview\n)([\s\S]*?)((?=\n## )|$)/,
-                  `$1${updates.description}\n\n$3`
-                );
-              }
-
-              writeFileSync(specPath, specContent);
-            } catch {
-              // Spec file update failed, continue anyway
-            }
-          }
-
-          console.log(`[TASK_UPDATE] Updated JSON files at: ${specDir}`);
-        } else {
-          console.log(`[TASK_UPDATE] Skipped JSON file writes (SQLite-only mode enabled)`);
-        }
-
         // Update metadata if provided
         let updatedMetadata = task.metadata;
         if (updates.metadata) {
           updatedMetadata = { ...task.metadata, ...updates.metadata };
 
-          // DUAL-WRITE: Process and save attached images only if enabled
-          if (ENABLE_DUAL_WRITE) {
-            if (updates.metadata.attachedImages && updates.metadata.attachedImages.length > 0) {
-              const attachmentsDir = path.join(specDir, 'attachments');
-              mkdirSync(attachmentsDir, { recursive: true });
+          // Process and save attached images to filesystem
+          if (updates.metadata.attachedImages && updates.metadata.attachedImages.length > 0) {
+            const attachmentsDir = path.join(specDir, 'attachments');
+            mkdirSync(attachmentsDir, { recursive: true });
 
-              const savedImages: typeof updates.metadata.attachedImages = [];
+            const savedImages: typeof updates.metadata.attachedImages = [];
 
-              for (const image of updates.metadata.attachedImages) {
-                // If image has data (new image), save it
-                if (image.data) {
-                  try {
-                    const buffer = Buffer.from(image.data, 'base64');
-                    const imagePath = path.join(attachmentsDir, image.filename);
-                    writeFileSync(imagePath, buffer);
+            for (const image of updates.metadata.attachedImages) {
+              // If image has data (new image), save it
+              if (image.data) {
+                try {
+                  const buffer = Buffer.from(image.data, 'base64');
+                  const imagePath = path.join(attachmentsDir, image.filename);
+                  writeFileSync(imagePath, buffer);
 
-                    savedImages.push({
-                      id: image.id,
-                      filename: image.filename,
-                      mimeType: image.mimeType,
-                      size: image.size,
-                      path: `attachments/${image.filename}`
-                    });
-                  } catch (err) {
-                    console.error(`Failed to save image ${image.filename}:`, err);
-                  }
-                } else if (image.path) {
-                  // Existing image, keep it
-                  savedImages.push(image);
+                  savedImages.push({
+                    id: image.id,
+                    filename: image.filename,
+                    mimeType: image.mimeType,
+                    size: image.size,
+                    path: `attachments/${image.filename}`
+                  });
+                } catch (err) {
+                  console.error(`Failed to save image ${image.filename}:`, err);
                 }
-              }
-
-              updatedMetadata.attachedImages = savedImages;
-            }
-
-            // Update task_metadata.json
-            const metadataPath = path.join(specDir, 'task_metadata.json');
-            try {
-              writeFileSync(metadataPath, JSON.stringify(updatedMetadata, null, 2));
-            } catch (err) {
-              console.error('Failed to update task_metadata.json:', err);
-            }
-
-            // Update requirements.json if it exists
-            const requirementsPath = path.join(specDir, 'requirements.json');
-            if (existsSync(requirementsPath)) {
-              try {
-                const requirementsContent = readFileSync(requirementsPath, 'utf-8');
-                const requirements = JSON.parse(requirementsContent);
-
-                if (updates.description !== undefined) {
-                  requirements.task_description = updates.description;
-                }
-                if (updates.metadata.category) {
-                  requirements.workflow_type = updates.metadata.category;
-                }
-
-                writeFileSync(requirementsPath, JSON.stringify(requirements, null, 2));
-              } catch (err) {
-                console.error('Failed to update requirements.json:', err);
+              } else if (image.path) {
+                // Existing image, keep it
+                savedImages.push(image);
               }
             }
+
+            updatedMetadata.attachedImages = savedImages;
           }
         }
 
@@ -613,28 +465,22 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
           updatedAt: new Date()
         };
 
-        // Write to SQLite database (primary storage)
+        // Write to project-local SQLite database
         // Use task.id (the actual database ID) not taskId (which might be specId)
         try {
-          const taskStorage = getTaskStorage();
+          const taskStorage = getProjectTaskStorage(project.path);
           taskStorage.updateTask(task.id, {
             title: finalTitle,
             description: updates.description,
             metadata: updatedMetadata
           });
-          console.warn(`[TASK_UPDATE] Updated in SQLite database: ${task.id}`);
+          console.warn(`[TASK_UPDATE] Updated in project-local database: ${task.id}`);
         } catch (dbError) {
           console.error('[TASK_UPDATE] Failed to update in SQLite:', dbError);
-          // If dual-write is enabled, JSON files are already updated as backup
-          if (ENABLE_DUAL_WRITE) {
-            console.warn('[TASK_UPDATE] Continuing with JSON-only (dual-write mode)');
-          } else {
-            // In SQLite-only mode, database write failure is critical
-            return {
-              success: false,
-              error: dbError instanceof Error ? dbError.message : 'Failed to update task in database'
-            };
-          }
+          return {
+            success: false,
+            error: dbError instanceof Error ? dbError.message : 'Failed to update task in database'
+          };
         }
 
         // Invalidate cache since a task was updated

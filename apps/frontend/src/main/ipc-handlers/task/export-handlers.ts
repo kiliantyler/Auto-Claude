@@ -4,7 +4,7 @@ import type { IPCResult, Task } from '../../../shared/types';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { projectStore } from '../../project-store';
-import { getTaskStorage } from '../../task-storage';
+import { getProjectTaskStorage } from '../../task-storage';
 
 /**
  * Register task export/import handlers for debugging and recovery
@@ -33,8 +33,8 @@ export function registerTaskExportHandlers(): void {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const backupPath = path.join(backupDir, `tasks-${timestamp}.json`);
 
-        // Read all tasks from database
-        const storage = getTaskStorage();
+        // Read all tasks from project-local database
+        const storage = getProjectTaskStorage(project.path);
         const tasks = storage.listTasks(projectId);
 
         // Export tasks to JSON file
@@ -145,8 +145,8 @@ export function registerTaskExportHandlers(): void {
           return { success: false, error: 'Invalid backup file format' };
         }
 
-        // Get current tasks to check for duplicates
-        const storage = getTaskStorage();
+        // Get current tasks from project-local database to check for duplicates
+        const storage = getProjectTaskStorage(project.path);
         const existingTasks = storage.listTasks(projectId);
         const existingTaskIds = new Set(existingTasks.map(t => t.id));
 
@@ -188,65 +188,6 @@ export function registerTaskExportHandlers(): void {
 
             // Create task in database
             storage.createTask(task);
-
-            // If dual-write enabled, also create JSON files (disabled by default)
-            const ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE === 'true';
-            if (ENABLE_DUAL_WRITE) {
-              // Create spec directory structure
-              const specsDir = path.join(
-                project.path,
-                project.autoBuildPath || '.auto-claude',
-                'specs',
-                task.specId
-              );
-
-              if (!existsSync(specsDir)) {
-                mkdirSync(specsDir, { recursive: true });
-              }
-
-              // Create implementation_plan.json
-              const implementationPlan = {
-                feature: task.title,
-                description: task.description,
-                created_at: task.createdAt.toISOString(),
-                updated_at: task.updatedAt.toISOString(),
-                status: task.status,
-                phases: task.subtasks.map((subtask, index) => ({
-                  phase: index + 1,
-                  name: subtask.title,
-                  type: 'implementation',
-                  subtasks: [{
-                    id: subtask.id,
-                    description: subtask.description,
-                    status: subtask.status,
-                    verification: subtask.verification
-                  }]
-                })),
-                final_acceptance: []
-              };
-
-              const planPath = path.join(specsDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
-              writeFileSync(planPath, JSON.stringify(implementationPlan, null, 2));
-
-              // Create requirements.json if metadata exists
-              if (task.metadata) {
-                const requirements = {
-                  task_description: task.description,
-                  workflow_type: task.metadata.category || 'feature'
-                };
-                const requirementsPath = path.join(specsDir, AUTO_BUILD_PATHS.REQUIREMENTS);
-                writeFileSync(requirementsPath, JSON.stringify(requirements, null, 2));
-              }
-
-              // Create QA report if exists
-              if (task.qaReport) {
-                const qaReportPath = path.join(specsDir, AUTO_BUILD_PATHS.QA_REPORT);
-                const qaReportContent = `# QA Report\n\nStatus: ${task.qaReport.status}\nTimestamp: ${task.qaReport.timestamp}\n\n## Issues\n\n${task.qaReport.issues.map(issue => `- [${issue.severity}] ${issue.description}`).join('\n')}`;
-                writeFileSync(qaReportPath, qaReportContent);
-              }
-
-              console.log(`[TASK_IMPORT] Created JSON files for task: ${task.specId}`);
-            }
 
             imported++;
             console.log(`[TASK_IMPORT] Imported task: ${task.id} (${task.specId})`);

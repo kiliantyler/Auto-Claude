@@ -24,6 +24,7 @@ import type {
   RecentSearch,
 } from '../../shared/types';
 import { getSearchService } from '../search-service';
+import { projectStore } from '../project-store';
 
 // IPC channel names for search operations
 export const SEARCH_CHANNELS = {
@@ -35,6 +36,18 @@ export const SEARCH_CHANNELS = {
   REBUILD_INDEX: 'search:rebuild-index',
   VERIFY_FTS5: 'search:verify-fts5',
 } as const;
+
+/**
+ * Helper to get project path from projectId
+ */
+function getProjectPath(projectId: string): string | null {
+  const project = projectStore.getProject(projectId);
+  if (!project) {
+    console.warn(`[Search Handlers] Project not found: ${projectId}`);
+    return null;
+  }
+  return project.path;
+}
 
 /**
  * Register search IPC handlers
@@ -73,13 +86,18 @@ export function registerSearchHandlers(): void {
    * Supports filtering by status, project, category, priority, tags.
    * Returns results with highlighted matches.
    *
+   * @param projectId - Project ID (required)
    * @param query - Search query parameters
    * @returns SearchQueryResult with ranked results and pagination info
    */
   ipcMain.handle(
     SEARCH_CHANNELS.QUERY,
-    async (_, query: SearchQuery): Promise<IPCResult<SearchQueryResult>> => {
+    async (_, projectId: string, query: SearchQuery): Promise<IPCResult<SearchQueryResult>> => {
       console.log('[Search Handlers] QUERY called with:', query?.query);
+
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
 
       if (!query || !query.query) {
         return {
@@ -94,9 +112,14 @@ export function registerSearchHandlers(): void {
         };
       }
 
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
+
       try {
         const service = getSearchService();
-        const result = service.search(query);
+        const result = service.search(projectPath, query);
         console.log(
           '[Search Handlers] QUERY returning',
           result.results.length,
@@ -124,13 +147,18 @@ export function registerSearchHandlers(): void {
    * - Tags matching the query
    * - Status values matching the query
    *
+   * @param projectId - Project ID (required)
    * @param options - Suggestion options (query, limit, includeRecent, projectId)
    * @returns SearchSuggestionResult with suggestions
    */
   ipcMain.handle(
     SEARCH_CHANNELS.SUGGESTIONS,
-    async (_, options: SearchSuggestionOptions): Promise<IPCResult<SearchSuggestionResult>> => {
+    async (_, projectId: string, options: SearchSuggestionOptions): Promise<IPCResult<SearchSuggestionResult>> => {
       console.log('[Search Handlers] SUGGESTIONS called with:', options?.query);
+
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
 
       if (!options) {
         return {
@@ -142,9 +170,14 @@ export function registerSearchHandlers(): void {
         };
       }
 
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
+
       try {
         const service = getSearchService();
-        const result = service.getSuggestions(options);
+        const result = service.getSuggestions(projectPath, options);
         console.log('[Search Handlers] SUGGESTIONS returning', result.suggestions.length, 'suggestions');
         return { success: true, data: result };
       } catch (error) {
@@ -211,15 +244,26 @@ export function registerSearchHandlers(): void {
    *
    * Use this if the index becomes corrupted or out of sync.
    * This is a maintenance operation and should be used sparingly.
+   *
+   * @param projectId - Project ID (required)
    */
   ipcMain.handle(
     SEARCH_CHANNELS.REBUILD_INDEX,
-    async (): Promise<IPCResult<void>> => {
+    async (_, projectId: string): Promise<IPCResult<void>> => {
       console.log('[Search Handlers] REBUILD_INDEX called');
+
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
+
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
 
       try {
         const service = getSearchService();
-        service.rebuildIndex();
+        service.rebuildIndex(projectPath);
         console.log('[Search Handlers] REBUILD_INDEX completed');
         return { success: true, data: undefined };
       } catch (error) {
@@ -235,16 +279,26 @@ export function registerSearchHandlers(): void {
   /**
    * Verify FTS5 is available in SQLite
    *
+   * @param projectId - Project ID (required)
    * @returns true if FTS5 is enabled in the SQLite build
    */
   ipcMain.handle(
     SEARCH_CHANNELS.VERIFY_FTS5,
-    async (): Promise<IPCResult<boolean>> => {
+    async (_, projectId: string): Promise<IPCResult<boolean>> => {
       console.log('[Search Handlers] VERIFY_FTS5 called');
+
+      if (!projectId) {
+        return { success: false, error: 'Project ID is required' };
+      }
+
+      const projectPath = getProjectPath(projectId);
+      if (!projectPath) {
+        return { success: false, error: 'Project not found' };
+      }
 
       try {
         const service = getSearchService();
-        const available = service.verifyFts5Available();
+        const available = service.verifyFts5Available(projectPath);
         console.log('[Search Handlers] VERIFY_FTS5 returning:', available);
         return { success: true, data: available };
       } catch (error) {

@@ -2,27 +2,25 @@
  * SQLite Database Connection Management
  * ======================================
  *
- * Provides connection management for better-sqlite3 with transaction support.
+ * Dual-Database Architecture:
+ * - GLOBAL database: userData/.auto-claude/app.db (projects registry)
+ * - PROJECT-LOCAL databases: <project>/.auto-claude/tasks.db (tasks, insights, etc.)
  *
  * Key Features:
  * - Synchronous API (better-sqlite3 doesn't use async/await)
  * - Automatic transaction management
  * - Safe connection lifecycle management
- * - Database file stored in userData/.auto-claude/tasks.db
+ * - Separate schemas for global vs project-local data
  *
  * Usage:
  * ```typescript
- * const dbConn = new DatabaseConnection();
- * const db = dbConn.getConnection();
+ * // Global database (projects registry)
+ * const globalDb = getGlobalDatabase();
+ * const projects = globalDb.getConnection().prepare('SELECT * FROM projects').all();
  *
- * // Execute queries
- * const result = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
- *
- * // Use transactions
- * dbConn.withTransaction(() => {
- *   db.prepare('INSERT INTO tasks ...').run(...);
- *   db.prepare('UPDATE metadata ...').run(...);
- * });
+ * // Project-local database (tasks, insights, etc.)
+ * const projectDb = getProjectDatabaseManager().getConnection('/path/to/project');
+ * const tasks = projectDb.getConnection().prepare('SELECT * FROM tasks').all();
  * ```
  */
 
@@ -33,47 +31,46 @@ import path from 'path';
 import { logSqliteFeatures, checkCompileOption } from './utils/sqlite-features';
 
 /**
- * Current schema version - update when adding new migrations
- * Version 003: Phase 4 tables (task_history, tasks_fts, undo_stack, task_metrics)
+ * Schema version constants
  */
-const CURRENT_SCHEMA_VERSION = '003';
+const GLOBAL_SCHEMA_VERSION = '002';
+const PROJECT_SCHEMA_VERSION = '005';
 
+/**
+ * Base DatabaseConnection class
+ * Provides common functionality for both global and project-local databases
+ */
 export class DatabaseConnection {
-  private db: Database.Database | null = null;
-  private dbPath: string;
+  protected db: Database.Database | null = null;
+  protected dbPath: string;
+  protected schemaFile: string;
+  protected schemaVersion: string;
+  protected logPrefix: string;
 
-  constructor(dbPath?: string) {
-    // Default to userData/.auto-claude/tasks.db
-    if (dbPath) {
-      this.dbPath = dbPath;
-    } else {
-      const userDataPath = app.getPath('userData');
-      const autoClaudeDir = path.join(userDataPath, '.auto-claude');
+  constructor(
+    dbPath: string,
+    schemaFile: string,
+    schemaVersion: string,
+    logPrefix: string = '[Database]'
+  ) {
+    this.dbPath = dbPath;
+    this.schemaFile = schemaFile;
+    this.schemaVersion = schemaVersion;
+    this.logPrefix = logPrefix;
 
-      // Ensure directory exists
-      if (!existsSync(autoClaudeDir)) {
-        mkdirSync(autoClaudeDir, { recursive: true });
-      }
-
-      this.dbPath = path.join(autoClaudeDir, 'tasks.db');
+    // Ensure directory exists
+    const dbDir = path.dirname(dbPath);
+    if (!existsSync(dbDir)) {
+      mkdirSync(dbDir, { recursive: true });
     }
   }
 
   /**
    * Get or create database connection.
-   *
-   * Connection is created on first access and reused for subsequent calls.
-   * Better-sqlite3 uses synchronous API - no async/await needed.
-   *
-   * @returns SQLite database connection
    */
   getConnection(): Database.Database {
     if (!this.db) {
-      // Create connection with safe defaults
-      this.db = new Database(this.dbPath, {
-        // Verbose mode logs SQL statements (useful for debugging)
-        // verbose: console.log,
-      });
+      this.db = new Database(this.dbPath);
 
       // Enable foreign key constraints
       this.db.pragma('foreign_keys = ON');
@@ -81,22 +78,21 @@ export class DatabaseConnection {
       // Use WAL mode for better concurrency
       this.db.pragma('journal_mode = WAL');
 
-      // Set synchronous mode to NORMAL for good balance of safety and performance
+      // Set synchronous mode to NORMAL
       this.db.pragma('synchronous = NORMAL');
 
-      // Log SQLite features (including FTS5 status) for debugging
+      // Log SQLite features for debugging
       logSqliteFeatures(this.db);
 
-      // Verify FTS5 is available (required for Phase 4B full-text search)
+      // Check FTS5 availability
       const fts5Enabled = checkCompileOption(this.db, 'ENABLE_FTS5');
       if (!fts5Enabled) {
         console.warn(
-          '[Database] WARNING: FTS5 is not enabled. Full-text search features will not work. ' +
-            'Try running: npm run rebuild'
+          `${this.logPrefix} WARNING: FTS5 is not enabled. Full-text search features will not work.`
         );
       }
 
-      console.log(`[Database] Initialized SQLite database at: ${this.dbPath}`);
+      console.log(`${this.logPrefix} Initialized database at: ${this.dbPath}`);
     }
 
     return this.db;
@@ -104,21 +100,6 @@ export class DatabaseConnection {
 
   /**
    * Execute a function within a transaction.
-   *
-   * Automatically handles commit on success and rollback on error.
-   * CRITICAL: Do NOT use async/await inside the callback - better-sqlite3
-   * will commit the transaction before awaits complete.
-   *
-   * @param fn - Function to execute within transaction (must be synchronous)
-   * @returns Result of the function
-   *
-   * @example
-   * ```typescript
-   * dbConn.withTransaction(() => {
-   *   db.prepare('INSERT INTO tasks ...').run(...);
-   *   db.prepare('UPDATE metadata ...').run(...);
-   * });
-   * ```
    */
   withTransaction<T>(fn: () => T): T {
     const db = this.getConnection();
@@ -128,14 +109,12 @@ export class DatabaseConnection {
 
   /**
    * Close the database connection.
-   *
-   * Should be called on app shutdown to ensure clean exit.
    */
   close(): void {
     if (this.db) {
       this.db.close();
       this.db = null;
-      console.log('[Database] Connection closed');
+      console.log(`${this.logPrefix} Connection closed`);
     }
   }
 
@@ -148,16 +127,11 @@ export class DatabaseConnection {
 
   /**
    * Get the current schema version from the metadata table.
-   *
-   * Returns null if the metadata table doesn't exist or version is not set.
-   *
-   * @returns Current schema version or null
    */
   getSchemaVersion(): string | null {
     const db = this.getConnection();
 
     try {
-      // Check if metadata table exists
       const tableCheck = db
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'")
         .get() as { name: string } | undefined;
@@ -166,38 +140,32 @@ export class DatabaseConnection {
         return null;
       }
 
-      // Get schema version from metadata
       const result = db.prepare("SELECT value FROM metadata WHERE key = 'schema_version'").get() as
         | { value: string }
         | undefined;
 
       return result?.value || null;
     } catch (error) {
-      console.error('[Database] Error getting schema version:', error);
+      console.error(`${this.logPrefix} Error getting schema version:`, error);
       return null;
     }
   }
 
   /**
    * Check if the database needs migration.
-   *
-   * Returns true if the current schema version is older than the expected version
-   * or if the schema hasn't been initialized yet.
-   *
-   * @returns true if migration is needed
    */
   needsMigration(): boolean {
     const currentVersion = this.getSchemaVersion();
 
     if (!currentVersion) {
-      console.log('[Database] No schema version found - migration needed');
+      console.log(`${this.logPrefix} No schema version found - migration needed`);
       return true;
     }
 
-    const needsUpdate = currentVersion < CURRENT_SCHEMA_VERSION;
+    const needsUpdate = currentVersion < this.schemaVersion;
     if (needsUpdate) {
       console.log(
-        `[Database] Schema version ${currentVersion} is older than ${CURRENT_SCHEMA_VERSION} - migration needed`
+        `${this.logPrefix} Schema version ${currentVersion} is older than ${this.schemaVersion} - migration needed`
       );
     }
 
@@ -205,91 +173,100 @@ export class DatabaseConnection {
   }
 
   /**
-   * Initialize the database schema by executing the SQL schema file.
-   *
-   * This method:
-   * 1. Reads the database-schema.sql file
-   * 2. Executes all CREATE TABLE, CREATE INDEX, and CREATE TRIGGER statements
-   * 3. Updates the schema version in metadata
-   *
-   * Safe to call multiple times - uses IF NOT EXISTS for all DDL.
-   *
-   * @param schemaPath - Optional custom path to schema file (for testing)
-   * @returns true if initialization succeeded
+   * Initialize the database schema.
    */
   initializeSchema(schemaPath?: string): boolean {
     const db = this.getConnection();
 
     try {
-      // Determine schema file path
-      const resolvedSchemaPath =
-        schemaPath ||
-        path.join(__dirname, 'database-schema.sql');
+      const resolvedSchemaPath = schemaPath || path.join(__dirname, this.schemaFile);
 
-      // Check if schema file exists
       if (!existsSync(resolvedSchemaPath)) {
-        console.error(`[Database] Schema file not found: ${resolvedSchemaPath}`);
+        console.error(`${this.logPrefix} Schema file not found: ${resolvedSchemaPath}`);
         return false;
       }
 
-      // Read and execute schema file
-      console.log(`[Database] Initializing schema from: ${resolvedSchemaPath}`);
+      console.log(`${this.logPrefix} Initializing schema from: ${resolvedSchemaPath}`);
       const schemaSQL = readFileSync(resolvedSchemaPath, 'utf-8');
 
-      // Execute all statements in the schema file
-      // Note: better-sqlite3's exec() handles multiple statements
       db.exec(schemaSQL);
 
-      // Update last migration timestamp
       db.prepare("INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_migration', datetime('now'))").run();
 
-      console.log(`[Database] Schema initialized successfully (version ${CURRENT_SCHEMA_VERSION})`);
+      console.log(`${this.logPrefix} Schema initialized successfully (version ${this.schemaVersion})`);
       return true;
     } catch (error) {
-      console.error('[Database] Failed to initialize schema:', error);
+      console.error(`${this.logPrefix} Failed to initialize schema:`, error);
       return false;
     }
   }
 
   /**
    * Run schema migration if needed.
-   *
-   * This method checks the current schema version and runs initializeSchema()
-   * if the database needs to be updated. It's safe to call on every app startup.
-   *
-   * @param schemaPath - Optional custom path to schema file (for testing)
-   * @returns true if database is up to date (either was already current or migration succeeded)
    */
   migrateIfNeeded(schemaPath?: string): boolean {
     if (this.needsMigration()) {
-      console.log('[Database] Running schema migration...');
+      console.log(`${this.logPrefix} Running schema migration...`);
       return this.initializeSchema(schemaPath);
     }
 
-    console.log(`[Database] Schema is up to date (version ${this.getSchemaVersion()})`);
+    console.log(`${this.logPrefix} Schema is up to date (version ${this.getSchemaVersion()})`);
     return true;
+  }
+}
+
+/**
+ * Global Database Connection
+ * ==========================
+ *
+ * Manages the global database at userData/.auto-claude/app.db
+ * Contains: projects registry, app-level metadata
+ */
+export class GlobalDatabaseConnection extends DatabaseConnection {
+  constructor() {
+    const userDataPath = app.getPath('userData');
+    const dbPath = path.join(userDataPath, '.auto-claude', 'app.db');
+
+    super(dbPath, 'database-schema-global.sql', GLOBAL_SCHEMA_VERSION, '[GlobalDB]');
+  }
+}
+
+/**
+ * Project Database Connection
+ * ===========================
+ *
+ * Manages a project-local database at <project>/.auto-claude/tasks.db
+ * Contains: tasks, insights, roadmaps, analytics, etc.
+ */
+export class ProjectDatabaseConnection extends DatabaseConnection {
+  private projectPath: string;
+
+  constructor(projectPath: string) {
+    const normalizedPath = path.normalize(projectPath);
+    const dbPath = path.join(normalizedPath, '.auto-claude', 'tasks.db');
+
+    super(dbPath, 'database-schema.sql', PROJECT_SCHEMA_VERSION, `[ProjectDB:${path.basename(normalizedPath)}]`);
+    this.projectPath = normalizedPath;
+  }
+
+  /**
+   * Get the project root path.
+   */
+  getProjectPath(): string {
+    return this.projectPath;
   }
 
   /**
    * Rebuild the FTS5 index from the tasks table.
-   *
-   * Use this method if the FTS index becomes corrupted or out of sync.
-   * This will delete all FTS data and re-populate from the tasks table.
-   *
-   * @returns true if rebuild succeeded
    */
   rebuildFtsIndex(): boolean {
     const db = this.getConnection();
 
     try {
-      console.log('[Database] Rebuilding FTS5 index...');
+      console.log(`${this.logPrefix} Rebuilding FTS5 index...`);
 
-      // Use a transaction to ensure atomicity
       const transaction = db.transaction(() => {
-        // Delete all FTS data using the 'delete-all' command
         db.exec("INSERT INTO tasks_fts(tasks_fts) VALUES('delete-all')");
-
-        // Re-populate FTS index from tasks table
         db.exec(`
           INSERT INTO tasks_fts(rowid, title, description, tags)
           SELECT rowid, title, description, json_extract(metadata_json, '$.tags')
@@ -299,22 +276,19 @@ export class DatabaseConnection {
 
       transaction();
 
-      console.log('[Database] FTS5 index rebuilt successfully');
+      console.log(`${this.logPrefix} FTS5 index rebuilt successfully`);
       return true;
     } catch (error) {
-      console.error('[Database] Failed to rebuild FTS index:', error);
+      console.error(`${this.logPrefix} Failed to rebuild FTS index:`, error);
       return false;
     }
   }
 
   /**
-   * Check if all Phase 4 tables exist in the database.
-   *
-   * Useful for verifying the schema was created correctly.
-   *
-   * @returns Object with table existence status
+   * Check if all required tables exist.
    */
-  checkPhase4Tables(): {
+  checkTables(): {
+    tasks: boolean;
     taskHistory: boolean;
     tasksFts: boolean;
     undoStack: boolean;
@@ -334,6 +308,7 @@ export class DatabaseConnection {
     };
 
     return {
+      tasks: checkTable('tasks'),
       taskHistory: checkTable('task_history'),
       tasksFts: checkTable('tasks_fts'),
       undoStack: checkTable('undo_stack'),
@@ -342,50 +317,255 @@ export class DatabaseConnection {
   }
 }
 
-// Singleton instance for the main database
-let _instance: DatabaseConnection | null = null;
+/**
+ * Project Database Manager
+ * ========================
+ *
+ * Manages database connections per project. Each project has its own
+ * SQLite database at <project>/.auto-claude/tasks.db
+ */
+export class ProjectDatabaseManager {
+  private connections = new Map<string, ProjectDatabaseConnection>();
+
+  /**
+   * Get the project schema path.
+   * Looks in multiple locations to support both dev and prod environments.
+   */
+  private getSchemaPath(): string | undefined {
+    const possiblePaths = [
+      path.join(__dirname, 'database-schema.sql'),           // Production: alongside compiled JS
+      path.join(__dirname, '../../src/main/database-schema.sql'), // Development: from out/main to src
+    ];
+
+    for (const schemaPath of possiblePaths) {
+      if (existsSync(schemaPath)) {
+        return schemaPath;
+      }
+    }
+
+    console.warn('[ProjectDBManager] Could not find database-schema.sql');
+    return undefined;
+  }
+
+  /**
+   * Get a database connection for a specific project.
+   * Automatically initializes the schema if needed.
+   */
+  getConnection(projectPath: string): ProjectDatabaseConnection {
+    const normalizedPath = path.normalize(projectPath);
+
+    if (!this.connections.has(normalizedPath)) {
+      const conn = new ProjectDatabaseConnection(projectPath);
+      this.connections.set(normalizedPath, conn);
+      console.log(`[ProjectDBManager] Created connection for: ${normalizedPath}`);
+
+      // Auto-initialize schema for new connections
+      const schemaPath = this.getSchemaPath();
+      conn.migrateIfNeeded(schemaPath);
+    }
+
+    return this.connections.get(normalizedPath)!;
+  }
+
+  /**
+   * Get the database path for a project.
+   */
+  getDbPath(projectPath: string): string {
+    return path.join(path.normalize(projectPath), '.auto-claude', 'tasks.db');
+  }
+
+  /**
+   * Check if a database exists for a project.
+   */
+  hasDatabase(projectPath: string): boolean {
+    return existsSync(this.getDbPath(projectPath));
+  }
+
+  /**
+   * Initialize the database schema for a project.
+   */
+  initializeProject(projectPath: string, schemaPath?: string): boolean {
+    const conn = this.getConnection(projectPath);
+    return conn.migrateIfNeeded(schemaPath);
+  }
+
+  /**
+   * Close a specific project's database connection.
+   */
+  closeProject(projectPath: string): void {
+    const normalizedPath = path.normalize(projectPath);
+    const conn = this.connections.get(normalizedPath);
+
+    if (conn) {
+      conn.close();
+      this.connections.delete(normalizedPath);
+      console.log(`[ProjectDBManager] Closed connection for: ${normalizedPath}`);
+    }
+  }
+
+  /**
+   * Close all project database connections.
+   */
+  closeAll(): void {
+    for (const [projectPath, conn] of this.connections.entries()) {
+      conn.close();
+      console.log(`[ProjectDBManager] Closed connection for: ${projectPath}`);
+    }
+    this.connections.clear();
+  }
+
+  /**
+   * Get the number of active connections.
+   */
+  getConnectionCount(): number {
+    return this.connections.size;
+  }
+
+  /**
+   * Get all active project paths.
+   */
+  getActiveProjects(): string[] {
+    return Array.from(this.connections.keys());
+  }
+}
+
+// ============================================
+// Singleton Instances
+// ============================================
+
+let _globalInstance: GlobalDatabaseConnection | null = null;
+let _projectManager: ProjectDatabaseManager | null = null;
 
 /**
- * Get the singleton database connection instance.
- *
- * @returns DatabaseConnection instance
+ * Get the global database connection (projects registry).
+ * @deprecated Use getGlobalDatabase() instead
  */
-export function getDatabaseConnection(): DatabaseConnection {
-  if (!_instance) {
-    _instance = new DatabaseConnection();
-  }
-  return _instance;
+export function getDatabaseConnection(): GlobalDatabaseConnection {
+  return getGlobalDatabase();
 }
 
 /**
- * Close the singleton database connection.
- * Call this on app shutdown.
+ * Get the global database connection (projects registry).
+ */
+export function getGlobalDatabase(): GlobalDatabaseConnection {
+  if (!_globalInstance) {
+    _globalInstance = new GlobalDatabaseConnection();
+  }
+  return _globalInstance;
+}
+
+/**
+ * Close the global database connection.
+ */
+export function closeGlobalDatabase(): void {
+  if (_globalInstance) {
+    _globalInstance.close();
+    _globalInstance = null;
+  }
+}
+
+/**
+ * @deprecated Use closeGlobalDatabase() instead
  */
 export function closeDatabaseConnection(): void {
-  if (_instance) {
-    _instance.close();
-    _instance = null;
+  closeGlobalDatabase();
+}
+
+/**
+ * Get the project database manager.
+ */
+export function getProjectDatabaseManager(): ProjectDatabaseManager {
+  if (!_projectManager) {
+    _projectManager = new ProjectDatabaseManager();
+  }
+  return _projectManager;
+}
+
+/**
+ * Close all project database connections.
+ */
+export function closeAllProjectDatabases(): void {
+  if (_projectManager) {
+    _projectManager.closeAll();
+    _projectManager = null;
   }
 }
 
 /**
- * Initialize database schema using the singleton connection.
- *
- * Convenience function that calls migrateIfNeeded() on the singleton instance.
- * Safe to call on every app startup - will only migrate if needed.
- *
- * @param schemaPath - Optional custom path to schema file (for testing)
- * @returns true if database is ready (schema is up to date)
+ * Close ALL database connections (global + all projects).
+ * Call this on app shutdown.
  */
-export function initializeDatabaseSchema(schemaPath?: string): boolean {
-  return getDatabaseConnection().migrateIfNeeded(schemaPath);
+export function closeAllDatabases(): void {
+  closeGlobalDatabase();
+  closeAllProjectDatabases();
 }
 
 /**
- * Get the current schema version constant.
- *
- * @returns Expected schema version string
+ * Initialize the global database schema.
+ * Safe to call on every app startup.
+ */
+export function initializeGlobalDatabase(schemaPath?: string): boolean {
+  return getGlobalDatabase().migrateIfNeeded(schemaPath);
+}
+
+/**
+ * @deprecated Use initializeGlobalDatabase() instead
+ */
+export function initializeDatabaseSchema(schemaPath?: string): boolean {
+  return initializeGlobalDatabase(schemaPath);
+}
+
+/**
+ * Get the expected global schema version.
  */
 export function getExpectedSchemaVersion(): string {
-  return CURRENT_SCHEMA_VERSION;
+  return GLOBAL_SCHEMA_VERSION;
 }
+
+/**
+ * Get the expected project schema version.
+ */
+export function getExpectedProjectSchemaVersion(): string {
+  return PROJECT_SCHEMA_VERSION;
+}
+
+// ============================================
+// Utility Functions for Service Layer
+// ============================================
+
+/**
+ * Get a project-local database connection by project path.
+ * Convenience wrapper around getProjectDatabaseManager().getConnection().
+ *
+ * @param projectPath - Path to the project root directory
+ * @returns Database connection for the project
+ */
+export function getProjectDatabase(projectPath: string): Database.Database {
+  return getProjectDatabaseManager().getConnection(projectPath).getConnection();
+}
+
+/**
+ * Get a project-local database connection by project ID.
+ * Requires importing projectStore - use this for services that have projectId but not path.
+ *
+ * @param projectId - Project ID
+ * @param projectStore - The project store instance (to avoid circular imports)
+ * @returns Database connection for the project, or null if project not found
+ */
+export function getProjectDatabaseById(
+  projectId: string,
+  projectStore: { getProject: (id: string) => { path: string } | undefined }
+): Database.Database | null {
+  const project = projectStore.getProject(projectId);
+  if (!project) {
+    console.warn(`[Database] Project not found: ${projectId}`);
+    return null;
+  }
+  return getProjectDatabase(project.path);
+}
+
+/**
+ * Type for database connection that exposes the underlying better-sqlite3 Database.
+ * Use this for service classes that need to store a reference.
+ */
+export type DatabaseInstance = Database.Database;

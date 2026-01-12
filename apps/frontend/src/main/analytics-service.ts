@@ -41,7 +41,7 @@ import type {
   AnalyticsExportOptions,
   AnalyticsExportResult,
 } from '../shared/types';
-import { getDatabaseConnection } from './database';
+import { getProjectDatabase } from './database';
 import Papa from 'papaparse';
 import { jsPDF } from 'jspdf';
 
@@ -73,16 +73,22 @@ export class AnalyticsService {
    *
    * Calculates summary statistics including totals, rates, and velocities.
    *
+   * @param projectPath - Path to the project (required)
    * @param options - Query options (date range, project filter)
    * @returns AnalyticsOverview with aggregated metrics
    */
-  getOverview(options?: AnalyticsQueryOptions): AnalyticsOverview {
+  getOverview(projectPath: string, options?: AnalyticsQueryOptions): AnalyticsOverview {
     if (!this.ENABLE_ANALYTICS) {
       return this.getEmptyOverview();
     }
 
+    if (!projectPath) {
+      console.warn('[AnalyticsService] getOverview called without projectPath');
+      return this.getEmptyOverview();
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       // Calculate date range
       const { startDate, endDate } = this.getDateRange(options);
@@ -159,7 +165,7 @@ export class AnalyticsService {
       let taskCountChange: number | undefined;
 
       if (options?.compareToPrevious) {
-        const previousPeriodData = this.getPreviousPeriodData(options, daysInPeriod);
+        const previousPeriodData = this.getPreviousPeriodData(projectPath, options, daysInPeriod);
         if (previousPeriodData) {
           completionRateChange = completionRate - previousPeriodData.completionRate;
           velocityChange = velocityPerDay - previousPeriodData.velocityPerDay;
@@ -197,16 +203,22 @@ export class AnalyticsService {
    *
    * Returns data points for each day/week/month in the specified period.
    *
+   * @param projectPath - Path to the project (required)
    * @param options - Query options (period, date range, project filter)
    * @returns TrendData with multiple data series
    */
-  getTrends(options?: AnalyticsQueryOptions): TrendData {
+  getTrends(projectPath: string, options?: AnalyticsQueryOptions): TrendData {
     if (!this.ENABLE_ANALYTICS) {
       return this.getEmptyTrends();
     }
 
+    if (!projectPath) {
+      console.warn('[AnalyticsService] getTrends called without projectPath');
+      return this.getEmptyTrends();
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const { startDate, endDate } = this.getDateRange(options);
       const period = options?.period || 'day';
@@ -228,7 +240,7 @@ export class AnalyticsService {
 
       // If no pre-aggregated metrics, calculate from tasks table
       if (metricsRows.length === 0) {
-        return this.calculateTrendsFromTasks(options, startDate, endDate, period);
+        return this.calculateTrendsFromTasks(projectPath, options, startDate, endDate, period);
       }
 
       // Convert metrics rows to trend data points
@@ -272,16 +284,22 @@ export class AnalyticsService {
    *
    * Returns task counts grouped by status, category, priority, etc.
    *
+   * @param projectPath - Path to the project (required)
    * @param options - Query options (project filter)
    * @returns DistributionData with multiple breakdowns
    */
-  getDistribution(options?: AnalyticsQueryOptions): DistributionData {
+  getDistribution(projectPath: string, options?: AnalyticsQueryOptions): DistributionData {
     if (!this.ENABLE_ANALYTICS) {
       return this.getEmptyDistribution();
     }
 
+    if (!projectPath) {
+      console.warn('[AnalyticsService] getDistribution called without projectPath');
+      return this.getEmptyDistribution();
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       // Build WHERE clause for filtering
       const { whereClause, params } = this.buildTaskWhereClause(options);
@@ -316,31 +334,13 @@ export class AnalyticsService {
         color: statusColors[row.status] || '#6b7280', // gray-500 fallback
       }));
 
-      // Get project distribution if not filtering by project
-      let byProject: DistributionDataPoint[] | undefined;
-      if (!options?.projectId) {
-        const projectQuery = `
-          SELECT t.project_id, p.name as project_name, COUNT(*) as count
-          FROM tasks t
-          LEFT JOIN projects p ON t.project_id = p.id
-          ${whereClause}
-          GROUP BY t.project_id
-          ORDER BY count DESC
-          LIMIT 10
-        `;
-        const projectStmt = db.prepare(projectQuery);
-        const projectRows = projectStmt.all(...params) as { project_id: string; project_name: string | null; count: number }[];
-
-        byProject = projectRows.map((row) => ({
-          name: row.project_name || row.project_id,
-          value: row.count,
-          percentage: totalTasks > 0 ? Math.round((row.count / totalTasks) * 100) : 0,
-        }));
-      }
+      // Note: Project distribution is no longer available since projects table
+      // is in global DB and tasks are in project-local DB. Each project has its
+      // own database, so cross-project distribution must be calculated at a higher level.
 
       return {
         byStatus,
-        byProject,
+        byProject: undefined,
         totalTasks,
       };
     } catch (error) {
@@ -403,6 +403,7 @@ export class AnalyticsService {
    * Get previous period data for comparison
    */
   private getPreviousPeriodData(
+    projectPath: string,
     options: AnalyticsQueryOptions,
     daysInPeriod: number
   ): { completionRate: number; velocityPerDay: number; totalTasks: number } | null {
@@ -423,7 +424,7 @@ export class AnalyticsService {
         compareToPrevious: false, // Prevent infinite recursion
       };
 
-      const prevOverview = this.getOverview(prevOptions);
+      const prevOverview = this.getOverview(projectPath, prevOptions);
       return {
         completionRate: prevOverview.completionRate,
         velocityPerDay: prevOverview.velocityPerDay,
@@ -438,13 +439,14 @@ export class AnalyticsService {
    * Calculate trends directly from tasks table when no metrics data exists
    */
   private calculateTrendsFromTasks(
+    projectPath: string,
     options: AnalyticsQueryOptions | undefined,
     startDate: string,
     endDate: string,
     period: AnalyticsPeriod
   ): TrendData {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       // Generate date range
       const dates = this.generateDateRange(startDate, endDate);
@@ -596,135 +598,120 @@ export class AnalyticsService {
    * Aggregates task metrics for the given date (or today) and stores them
    * in the task_metrics table. Uses UPSERT to update existing entries.
    *
+   * @param projectPath - Path to the project (required)
+   * @param projectId - Project ID for storing metrics
    * @param date - The date to calculate metrics for (ISO format: YYYY-MM-DD, defaults to today)
-   * @param projectId - Optional project ID to calculate metrics for (all projects if not specified)
    * @returns Object with success status and metrics count
    */
   calculateDailyMetrics(
-    date?: string,
-    projectId?: string
+    projectPath: string,
+    projectId: string,
+    date?: string
   ): { success: boolean; metricsCalculated: number; error?: string } {
     if (!this.ENABLE_ANALYTICS) {
       return { success: false, metricsCalculated: 0, error: 'Analytics feature is disabled' };
     }
 
+    if (!projectPath || !projectId) {
+      return { success: false, metricsCalculated: 0, error: 'Project path and ID are required' };
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       // Use provided date or default to today
       const metricDate = date || new Date().toISOString().split('T')[0];
 
-      // Get list of projects to calculate metrics for
-      let projectIds: string[];
-      if (projectId) {
-        projectIds = [projectId];
-      } else {
-        // Get all distinct project IDs from tasks table
-        const projectsQuery = db.prepare('SELECT DISTINCT project_id FROM tasks WHERE project_id IS NOT NULL');
-        const projectRows = projectsQuery.all() as { project_id: string }[];
-        projectIds = projectRows.map((row) => row.project_id);
-      }
+      // Calculate task counts by status
+      const countsQuery = db.prepare(`
+        SELECT
+          COUNT(*) as total_tasks,
+          SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as completed_tasks,
+          SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_tasks,
+          SUM(CASE WHEN status = 'ai_review' OR status = 'human_review' THEN 1 ELSE 0 END) as blocked_tasks
+        FROM tasks
+        WHERE (metadata_json IS NULL OR metadata_json NOT LIKE '%"archivedAt"%')
+      `);
+      const counts = countsQuery.get() as {
+        total_tasks: number;
+        completed_tasks: number;
+        in_progress_tasks: number;
+        blocked_tasks: number;
+      };
 
-      let metricsCalculated = 0;
+      // Count tasks created on this date
+      const createdQuery = db.prepare(`
+        SELECT COUNT(*) as count
+        FROM tasks
+        WHERE date(created_at) = ?
+      `);
+      const createdResult = createdQuery.get(metricDate) as { count: number };
 
-      for (const projId of projectIds) {
-        // Calculate task counts by status
-        const countsQuery = db.prepare(`
-          SELECT
-            COUNT(*) as total_tasks,
-            SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as completed_tasks,
-            SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_tasks,
-            SUM(CASE WHEN status = 'ai_review' OR status = 'human_review' THEN 1 ELSE 0 END) as blocked_tasks
-          FROM tasks
-          WHERE project_id = ?
-            AND (metadata_json IS NULL OR metadata_json NOT LIKE '%"archivedAt"%')
-        `);
-        const counts = countsQuery.get(projId) as {
-          total_tasks: number;
-          completed_tasks: number;
-          in_progress_tasks: number;
-          blocked_tasks: number;
-        };
+      // Count tasks completed on this date (status changed to 'done' on this date)
+      // We check the task_history table for status_changed events to 'done'
+      const completedQuery = db.prepare(`
+        SELECT COUNT(DISTINCT task_id) as count
+        FROM task_history
+        WHERE date(timestamp) = ?
+          AND action = 'status_changed'
+          AND json_extract(new_value, '$.status') = 'done'
+      `);
+      const completedResult = completedQuery.get(metricDate) as { count: number };
 
-        // Count tasks created on this date
-        const createdQuery = db.prepare(`
-          SELECT COUNT(*) as count
-          FROM tasks
-          WHERE project_id = ?
-            AND date(created_at) = ?
-        `);
-        const createdResult = createdQuery.get(projId, metricDate) as { count: number };
+      // Calculate average completion time for tasks completed on this date
+      // This is the time between task creation and completion
+      const avgTimeQuery = db.prepare(`
+        SELECT AVG(
+          (julianday(h.timestamp) - julianday(t.created_at)) * 24
+        ) as avg_hours
+        FROM task_history h
+        JOIN tasks t ON h.task_id = t.id
+        WHERE date(h.timestamp) = ?
+          AND h.action = 'status_changed'
+          AND json_extract(h.new_value, '$.status') = 'done'
+      `);
+      const avgTimeResult = avgTimeQuery.get(metricDate) as { avg_hours: number | null };
 
-        // Count tasks completed on this date (status changed to 'done' on this date)
-        // We check the task_history table for status_changed events to 'done'
-        const completedQuery = db.prepare(`
-          SELECT COUNT(DISTINCT task_id) as count
-          FROM task_history
-          WHERE date(timestamp) = ?
-            AND action = 'status_changed'
-            AND json_extract(new_value, '$.status') = 'done'
-            AND task_id IN (SELECT id FROM tasks WHERE project_id = ?)
-        `);
-        const completedResult = completedQuery.get(metricDate, projId) as { count: number };
+      // Round average completion time to 2 decimal places
+      const avgCompletionTimeHours =
+        avgTimeResult.avg_hours !== null ? Math.round(avgTimeResult.avg_hours * 100) / 100 : null;
 
-        // Calculate average completion time for tasks completed on this date
-        // This is the time between task creation and completion
-        const avgTimeQuery = db.prepare(`
-          SELECT AVG(
-            (julianday(h.timestamp) - julianday(t.created_at)) * 24
-          ) as avg_hours
-          FROM task_history h
-          JOIN tasks t ON h.task_id = t.id
-          WHERE t.project_id = ?
-            AND date(h.timestamp) = ?
-            AND h.action = 'status_changed'
-            AND json_extract(h.new_value, '$.status') = 'done'
-        `);
-        const avgTimeResult = avgTimeQuery.get(projId, metricDate) as { avg_hours: number | null };
+      // Upsert metrics into task_metrics table
+      const upsertQuery = db.prepare(`
+        INSERT INTO task_metrics (
+          project_id,
+          metric_date,
+          total_tasks,
+          completed_tasks,
+          in_progress_tasks,
+          blocked_tasks,
+          avg_completion_time_hours,
+          created_count,
+          completed_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, metric_date) DO UPDATE SET
+          total_tasks = excluded.total_tasks,
+          completed_tasks = excluded.completed_tasks,
+          in_progress_tasks = excluded.in_progress_tasks,
+          blocked_tasks = excluded.blocked_tasks,
+          avg_completion_time_hours = excluded.avg_completion_time_hours,
+          created_count = excluded.created_count,
+          completed_count = excluded.completed_count
+      `);
 
-        // Round average completion time to 2 decimal places
-        const avgCompletionTimeHours =
-          avgTimeResult.avg_hours !== null ? Math.round(avgTimeResult.avg_hours * 100) / 100 : null;
+      upsertQuery.run(
+        projectId,
+        metricDate,
+        counts.total_tasks || 0,
+        counts.completed_tasks || 0,
+        counts.in_progress_tasks || 0,
+        counts.blocked_tasks || 0,
+        avgCompletionTimeHours,
+        createdResult.count || 0,
+        completedResult.count || 0
+      );
 
-        // Upsert metrics into task_metrics table
-        const upsertQuery = db.prepare(`
-          INSERT INTO task_metrics (
-            project_id,
-            metric_date,
-            total_tasks,
-            completed_tasks,
-            in_progress_tasks,
-            blocked_tasks,
-            avg_completion_time_hours,
-            created_count,
-            completed_count
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(project_id, metric_date) DO UPDATE SET
-            total_tasks = excluded.total_tasks,
-            completed_tasks = excluded.completed_tasks,
-            in_progress_tasks = excluded.in_progress_tasks,
-            blocked_tasks = excluded.blocked_tasks,
-            avg_completion_time_hours = excluded.avg_completion_time_hours,
-            created_count = excluded.created_count,
-            completed_count = excluded.completed_count
-        `);
-
-        upsertQuery.run(
-          projId,
-          metricDate,
-          counts.total_tasks || 0,
-          counts.completed_tasks || 0,
-          counts.in_progress_tasks || 0,
-          counts.blocked_tasks || 0,
-          avgCompletionTimeHours,
-          createdResult.count || 0,
-          completedResult.count || 0
-        );
-
-        metricsCalculated++;
-      }
-
-      return { success: true, metricsCalculated };
+      return { success: true, metricsCalculated: 1 };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error calculating daily metrics';
       console.error('[AnalyticsService] Failed to calculate daily metrics:', error);
@@ -737,18 +724,24 @@ export class AnalyticsService {
    *
    * Useful for backfilling historical metrics or recalculating after data changes.
    *
+   * @param projectPath - Path to the project (required)
+   * @param projectId - Project ID for storing metrics (required)
    * @param startDate - Start date (ISO format: YYYY-MM-DD)
    * @param endDate - End date (ISO format: YYYY-MM-DD)
-   * @param projectId - Optional project ID to calculate metrics for
    * @returns Object with success status and total metrics count
    */
   calculateMetricsForRange(
+    projectPath: string,
+    projectId: string,
     startDate: string,
-    endDate: string,
-    projectId?: string
+    endDate: string
   ): { success: boolean; totalMetrics: number; errors: string[] } {
     if (!this.ENABLE_ANALYTICS) {
       return { success: false, totalMetrics: 0, errors: ['Analytics feature is disabled'] };
+    }
+
+    if (!projectPath || !projectId) {
+      return { success: false, totalMetrics: 0, errors: ['Project path and ID are required'] };
     }
 
     const errors: string[] = [];
@@ -759,7 +752,7 @@ export class AnalyticsService {
       const dates = this.generateDateRange(startDate, endDate);
 
       for (const date of dates) {
-        const result = this.calculateDailyMetrics(date, projectId);
+        const result = this.calculateDailyMetrics(projectPath, projectId, date);
         if (result.success) {
           totalMetrics += result.metricsCalculated;
         } else if (result.error) {
@@ -778,16 +771,22 @@ export class AnalyticsService {
   /**
    * Get stored metrics from the task_metrics table
    *
+   * @param projectPath - Path to the project (required)
    * @param options - Query options (date range, project filter)
    * @returns Array of TaskMetricsData objects
    */
-  getStoredMetrics(options?: AnalyticsQueryOptions): TaskMetricsData[] {
+  getStoredMetrics(projectPath: string, options?: AnalyticsQueryOptions): TaskMetricsData[] {
     if (!this.ENABLE_ANALYTICS) {
       return [];
     }
 
+    if (!projectPath) {
+      console.warn('[AnalyticsService] getStoredMetrics called without projectPath');
+      return [];
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
       const { startDate, endDate } = this.getDateRange(options);
 
       let query = `
@@ -828,16 +827,22 @@ export class AnalyticsService {
   /**
    * Clean up old metrics data
    *
+   * @param projectPath - Path to the project (required)
    * @param daysToKeep - Number of days of metrics to keep (default: 365)
    * @returns Number of rows deleted
    */
-  cleanupOldMetrics(daysToKeep: number = 365): number {
+  cleanupOldMetrics(projectPath: string, daysToKeep: number = 365): number {
     if (!this.ENABLE_ANALYTICS) {
       return 0;
     }
 
+    if (!projectPath) {
+      console.warn('[AnalyticsService] cleanupOldMetrics called without projectPath');
+      return 0;
+    }
+
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getProjectDatabase(projectPath);
 
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
@@ -856,12 +861,17 @@ export class AnalyticsService {
   /**
    * Export analytics data to the specified format
    *
+   * @param projectPath - Path to the project (required)
    * @param options - Export options (format, sections, date range, etc.)
    * @returns AnalyticsExportResult with success status and data/error
    */
-  exportData(options: AnalyticsExportOptions): AnalyticsExportResult {
+  exportData(projectPath: string, options: AnalyticsExportOptions): AnalyticsExportResult {
     if (!this.ENABLE_ANALYTICS) {
       return { success: false, error: 'Analytics feature is disabled' };
+    }
+
+    if (!projectPath) {
+      return { success: false, error: 'Project path is required' };
     }
 
     try {
@@ -873,11 +883,11 @@ export class AnalyticsService {
 
       switch (options.format) {
         case 'csv':
-          return this.exportToCSV(queryOptions, options);
+          return this.exportToCSV(projectPath, queryOptions, options);
         case 'pdf':
-          return this.exportToPDF(queryOptions, options);
+          return this.exportToPDF(projectPath, queryOptions, options);
         case 'json':
-          return this.exportToJSON(queryOptions, options);
+          return this.exportToJSON(projectPath, queryOptions, options);
         default:
           return { success: false, error: `Unsupported export format: ${options.format}` };
       }
@@ -890,11 +900,13 @@ export class AnalyticsService {
   /**
    * Export analytics data to CSV format using papaparse
    *
+   * @param projectPath - Path to the project
    * @param queryOptions - Query options for fetching data
    * @param exportOptions - Export options (sections, filename, etc.)
    * @returns AnalyticsExportResult with CSV data
    */
   private exportToCSV(
+    projectPath: string,
     queryOptions: AnalyticsQueryOptions,
     exportOptions: AnalyticsExportOptions
   ): AnalyticsExportResult {
@@ -904,7 +916,7 @@ export class AnalyticsService {
 
       // Export overview section
       if (sections.includes('overview')) {
-        const overview = this.getOverview(queryOptions);
+        const overview = this.getOverview(projectPath, queryOptions);
         const overviewData = [
           { Metric: 'Total Tasks', Value: overview.totalTasks },
           { Metric: 'Completed Tasks', Value: overview.completedTasks },
@@ -926,7 +938,7 @@ export class AnalyticsService {
 
       // Export trends section
       if (sections.includes('trends')) {
-        const trends = this.getTrends(queryOptions);
+        const trends = this.getTrends(projectPath, queryOptions);
         const trendData = trends.completedTasks.map((point, index) => ({
           Date: point.date,
           'Completed Tasks': point.value,
@@ -945,7 +957,7 @@ export class AnalyticsService {
 
       // Export distribution section
       if (sections.includes('distribution')) {
-        const distribution = this.getDistribution(queryOptions);
+        const distribution = this.getDistribution(projectPath, queryOptions);
         const distributionData = distribution.byStatus.map((item) => ({
           Status: item.name,
           Count: item.value,
@@ -974,7 +986,7 @@ export class AnalyticsService {
 
       // Export velocity section
       if (sections.includes('velocity')) {
-        const trends = this.getTrends(queryOptions);
+        const trends = this.getTrends(projectPath, queryOptions);
         const velocityData = trends.velocity.map((point, index) => ({
           Date: point.date,
           Completed: point.value,
@@ -1006,11 +1018,13 @@ export class AnalyticsService {
   /**
    * Export analytics data to PDF format using jspdf
    *
+   * @param projectPath - Path to the project
    * @param queryOptions - Query options for fetching data
    * @param exportOptions - Export options (sections, filename, etc.)
    * @returns AnalyticsExportResult with base64 PDF data
    */
   private exportToPDF(
+    projectPath: string,
     queryOptions: AnalyticsQueryOptions,
     exportOptions: AnalyticsExportOptions
   ): AnalyticsExportResult {
@@ -1055,7 +1069,7 @@ export class AnalyticsService {
         doc.text('Overview Metrics', margin, yPosition);
         yPosition += 8;
 
-        const overview = this.getOverview(queryOptions);
+        const overview = this.getOverview(projectPath, queryOptions);
         doc.setFontSize(10);
         doc.setFont('helvetica', 'normal');
 
@@ -1100,7 +1114,7 @@ export class AnalyticsService {
         doc.text('Status Distribution', margin, yPosition);
         yPosition += 8;
 
-        const distribution = this.getDistribution(queryOptions);
+        const distribution = this.getDistribution(projectPath, queryOptions);
         doc.setFontSize(10);
         doc.setFont('helvetica', 'normal');
 
@@ -1133,7 +1147,7 @@ export class AnalyticsService {
         doc.text('Trend Summary', margin, yPosition);
         yPosition += 8;
 
-        const trends = this.getTrends(queryOptions);
+        const trends = this.getTrends(projectPath, queryOptions);
         doc.setFontSize(10);
         doc.setFont('helvetica', 'normal');
 
@@ -1172,7 +1186,7 @@ export class AnalyticsService {
         doc.text('Velocity Details', margin, yPosition);
         yPosition += 8;
 
-        const trends = this.getTrends(queryOptions);
+        const trends = this.getTrends(projectPath, queryOptions);
         doc.setFontSize(9);
 
         // Table header
@@ -1223,11 +1237,13 @@ export class AnalyticsService {
   /**
    * Export analytics data to JSON format
    *
+   * @param projectPath - Path to the project
    * @param queryOptions - Query options for fetching data
    * @param exportOptions - Export options (sections, filename, etc.)
    * @returns AnalyticsExportResult with JSON data
    */
   private exportToJSON(
+    projectPath: string,
     queryOptions: AnalyticsQueryOptions,
     exportOptions: AnalyticsExportOptions
   ): AnalyticsExportResult {
@@ -1242,20 +1258,20 @@ export class AnalyticsService {
       };
 
       if (sections.includes('overview')) {
-        exportData.overview = this.getOverview(queryOptions);
+        exportData.overview = this.getOverview(projectPath, queryOptions);
       }
 
       if (sections.includes('trends')) {
-        exportData.trends = this.getTrends(queryOptions);
+        exportData.trends = this.getTrends(projectPath, queryOptions);
       }
 
       if (sections.includes('distribution')) {
-        exportData.distribution = this.getDistribution(queryOptions);
+        exportData.distribution = this.getDistribution(projectPath, queryOptions);
       }
 
       if (sections.includes('velocity')) {
         // Velocity is derived from trends
-        const trends = this.getTrends(queryOptions);
+        const trends = this.getTrends(projectPath, queryOptions);
         exportData.velocity = {
           period: trends.period,
           dataPoints: trends.velocity.map((point, index) => ({

@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
-import { getDatabaseConnection } from './database';
+import { getGlobalDatabase, getProjectDatabaseManager } from './database';
+import { projectStore } from './project-store';
 import type Database from 'better-sqlite3';
 
 interface DatabaseEvent {
@@ -10,22 +11,38 @@ interface DatabaseEvent {
   timestamp: string;
 }
 
+interface ProjectPoller {
+  projectId: string;
+  projectPath: string;
+  getEventsStmt: Database.Statement;
+  deleteEventsStmt: Database.Statement;
+  lastPollTimestamp: string;
+}
+
 /**
- * Polls the event_queue table for database changes and emits IPC events.
+ * Polls the event_queue tables from both global and project-local databases.
+ *
+ * Dual-Database Polling:
+ * - Global database (app.db): Polls for project events (insert/update/delete)
+ * - Project-local databases (tasks.db): Polls for task events in each active project
+ *
  * Replaces file watchers for real-time updates with <100ms latency.
  */
 export class DatabaseEventPoller extends EventEmitter {
   private pollInterval: NodeJS.Timeout | null = null;
-  private lastPollTimestamp: string | null = null;
   private isPolling = false;
-  private db: Database.Database | null = null;
 
-  // Prepared statements for better performance
-  private getEventsStmt: Database.Statement | null = null;
-  private deleteEventsStmt: Database.Statement | null = null;
+  // Global database poller state
+  private globalDb: Database.Database | null = null;
+  private globalGetEventsStmt: Database.Statement | null = null;
+  private globalDeleteEventsStmt: Database.Statement | null = null;
+  private globalLastPollTimestamp: string | null = null;
+
+  // Project-local database pollers (one per active project)
+  private projectPollers: Map<string, ProjectPoller> = new Map();
 
   /**
-   * Start polling the event_queue for new events.
+   * Start polling both global and project-local databases for events.
    *
    * @param intervalMs - Polling interval in milliseconds (default: 100ms)
    */
@@ -36,24 +53,14 @@ export class DatabaseEventPoller extends EventEmitter {
     }
 
     try {
-      // Get database connection
-      const dbConn = getDatabaseConnection();
-      this.db = dbConn.getConnection();
+      // Initialize global database poller
+      this.initGlobalPoller();
 
-      // Prepare statements for efficient polling
-      this.getEventsStmt = this.db.prepare(`
-        SELECT id, event_type, entity_id, entity_type, timestamp
-        FROM event_queue
-        WHERE timestamp > ?
-        ORDER BY timestamp ASC, id ASC
-      `);
-
-      this.deleteEventsStmt = this.db.prepare(`
-        DELETE FROM event_queue WHERE id = ?
-      `);
+      // Initialize project-local pollers for all registered projects
+      this.initProjectPollers();
 
       // Initialize last poll timestamp to now
-      this.lastPollTimestamp = new Date().toISOString();
+      this.globalLastPollTimestamp = new Date().toISOString();
 
       this.isPolling = true;
       console.log(`[DatabaseEventPoller] Started polling every ${intervalMs}ms`);
@@ -72,6 +79,105 @@ export class DatabaseEventPoller extends EventEmitter {
   }
 
   /**
+   * Initialize the global database poller for project events.
+   * @private
+   */
+  private initGlobalPoller(): void {
+    const dbConn = getGlobalDatabase();
+    this.globalDb = dbConn.getConnection();
+
+    this.globalGetEventsStmt = this.globalDb.prepare(`
+      SELECT id, event_type, entity_id, entity_type, timestamp
+      FROM event_queue
+      WHERE timestamp > ?
+      ORDER BY timestamp ASC, id ASC
+    `);
+
+    this.globalDeleteEventsStmt = this.globalDb.prepare(`
+      DELETE FROM event_queue WHERE id = ?
+    `);
+
+    console.log('[DatabaseEventPoller] Initialized global database poller');
+  }
+
+  /**
+   * Initialize project-local pollers for all registered projects.
+   * @private
+   */
+  private initProjectPollers(): void {
+    const projects = projectStore.getProjects();
+
+    for (const project of projects) {
+      this.addProjectPoller(project.id, project.path);
+    }
+
+    console.log(`[DatabaseEventPoller] Initialized ${this.projectPollers.size} project poller(s)`);
+  }
+
+  /**
+   * Add a poller for a specific project.
+   * Called when a new project is added or when starting polling.
+   *
+   * @param projectId - Project ID
+   * @param projectPath - Path to the project directory
+   */
+  addProjectPoller(projectId: string, projectPath: string): void {
+    if (this.projectPollers.has(projectId)) {
+      return; // Already polling this project
+    }
+
+    try {
+      const dbManager = getProjectDatabaseManager();
+
+      // Check if database exists for this project
+      if (!dbManager.hasDatabase(projectPath)) {
+        console.log(`[DatabaseEventPoller] No database found for project ${projectId}, skipping`);
+        return;
+      }
+
+      const conn = dbManager.getConnection(projectPath);
+      const db = conn.getConnection();
+
+      const getEventsStmt = db.prepare(`
+        SELECT id, event_type, entity_id, entity_type, timestamp
+        FROM event_queue
+        WHERE timestamp > ?
+        ORDER BY timestamp ASC, id ASC
+      `);
+
+      const deleteEventsStmt = db.prepare(`
+        DELETE FROM event_queue WHERE id = ?
+      `);
+
+      this.projectPollers.set(projectId, {
+        projectId,
+        projectPath,
+        getEventsStmt,
+        deleteEventsStmt,
+        lastPollTimestamp: new Date().toISOString(),
+      });
+
+      console.log(`[DatabaseEventPoller] Added poller for project ${projectId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[DatabaseEventPoller] Failed to add poller for project ${projectId}: ${message}`);
+    }
+  }
+
+  /**
+   * Remove a poller for a specific project.
+   * Called when a project is removed or closed.
+   *
+   * @param projectId - Project ID to remove poller for
+   */
+  removeProjectPoller(projectId: string): void {
+    if (this.projectPollers.has(projectId)) {
+      this.projectPollers.delete(projectId);
+      console.log(`[DatabaseEventPoller] Removed poller for project ${projectId}`);
+    }
+  }
+
+  /**
    * Stop polling the event_queue.
    */
   stop(): void {
@@ -84,16 +190,14 @@ export class DatabaseEventPoller extends EventEmitter {
       this.pollInterval = null;
     }
 
-    // Clean up prepared statements
-    if (this.getEventsStmt) {
-      // better-sqlite3 statements don't need explicit cleanup
-      this.getEventsStmt = null;
-    }
-    if (this.deleteEventsStmt) {
-      this.deleteEventsStmt = null;
-    }
+    // Clean up global poller
+    this.globalGetEventsStmt = null;
+    this.globalDeleteEventsStmt = null;
+    this.globalDb = null;
 
-    this.db = null;
+    // Clean up project pollers
+    this.projectPollers.clear();
+
     this.isPolling = false;
     console.log('[DatabaseEventPoller] Stopped polling');
   }
@@ -106,56 +210,112 @@ export class DatabaseEventPoller extends EventEmitter {
   }
 
   /**
-   * Poll the event_queue for new events and emit them.
+   * Poll all databases for new events and emit them.
    * @private
    */
   private poll(): void {
-    if (!this.db || !this.getEventsStmt || !this.deleteEventsStmt) {
+    // Poll global database for project events
+    this.pollGlobalDatabase();
+
+    // Poll each project database for task events
+    this.pollProjectDatabases();
+  }
+
+  /**
+   * Poll the global database for project events.
+   * @private
+   */
+  private pollGlobalDatabase(): void {
+    if (!this.globalDb || !this.globalGetEventsStmt || !this.globalDeleteEventsStmt) {
       return;
     }
 
     try {
-      // Get events since last poll
-      const events = this.getEventsStmt.all(
-        this.lastPollTimestamp || '1970-01-01T00:00:00.000Z'
+      const events = this.globalGetEventsStmt.all(
+        this.globalLastPollTimestamp || '1970-01-01T00:00:00.000Z'
       ) as DatabaseEvent[];
 
       if (events.length === 0) {
         return;
       }
 
-      // Process each event
       for (const event of events) {
         try {
-          // Emit IPC event based on entity type and event type
-          this.emitIpcEvent(event);
+          // Only process project events from global database
+          if (event.entity_type === 'project') {
+            this.emitIpcEvent(event);
+          }
 
           // Delete processed event from queue
-          this.deleteEventsStmt.run(event.id);
+          this.globalDeleteEventsStmt.run(event.id);
 
           // Update last poll timestamp
-          this.lastPollTimestamp = event.timestamp;
+          this.globalLastPollTimestamp = event.timestamp;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.emit('error', `Failed to process event ${event.id}: ${message}`);
+          this.emit('error', `Failed to process global event ${event.id}: ${message}`);
         }
       }
 
-      // Log processed events count
       if (events.length > 0) {
-        console.log(`[DatabaseEventPoller] Processed ${events.length} event(s)`);
+        console.log(`[DatabaseEventPoller] Processed ${events.length} global event(s)`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.emit('error', `Poll failed: ${message}`);
+      this.emit('error', `Global poll failed: ${message}`);
+    }
+  }
+
+  /**
+   * Poll all project databases for task events.
+   * @private
+   */
+  private pollProjectDatabases(): void {
+    for (const [projectId, poller] of this.projectPollers) {
+      try {
+        const events = poller.getEventsStmt.all(
+          poller.lastPollTimestamp || '1970-01-01T00:00:00.000Z'
+        ) as DatabaseEvent[];
+
+        if (events.length === 0) {
+          continue;
+        }
+
+        for (const event of events) {
+          try {
+            // Only process task events from project databases
+            if (event.entity_type === 'task') {
+              this.emitIpcEvent(event, projectId);
+            }
+
+            // Delete processed event from queue
+            poller.deleteEventsStmt.run(event.id);
+
+            // Update last poll timestamp
+            poller.lastPollTimestamp = event.timestamp;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.emit('error', `Failed to process project event ${event.id}: ${message}`);
+          }
+        }
+
+        if (events.length > 0) {
+          console.log(`[DatabaseEventPoller] Processed ${events.length} event(s) from project ${projectId}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.emit('error', `Poll failed for project ${projectId}: ${message}`);
+      }
     }
   }
 
   /**
    * Emit IPC event based on database event type.
    * @private
+   * @param event - The database event
+   * @param projectId - Optional project ID for task events
    */
-  private emitIpcEvent(event: DatabaseEvent): void {
+  private emitIpcEvent(event: DatabaseEvent, projectId?: string): void {
     const { event_type, entity_id, entity_type } = event;
 
     // Map database event types to IPC event names
@@ -196,11 +356,15 @@ export class DatabaseEventPoller extends EventEmitter {
       return;
     }
 
-    // Emit the IPC event with entity ID
-    this.emit('event', ipcEventName, entity_id);
+    // Emit the IPC event with entity ID and optional project ID
+    if (projectId) {
+      this.emit('event', ipcEventName, entity_id, projectId);
+    } else {
+      this.emit('event', ipcEventName, entity_id);
+    }
 
     console.log(
-      `[DatabaseEventPoller] Emitted ${ipcEventName} for ${entity_type} ${entity_id}`
+      `[DatabaseEventPoller] Emitted ${ipcEventName} for ${entity_type} ${entity_id}${projectId ? ` in project ${projectId}` : ''}`
     );
   }
 }

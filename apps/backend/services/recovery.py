@@ -11,6 +11,8 @@ Key Features:
 - Attempt history tracking across sessions
 - Smart retry with different approaches
 - Escalation to human when stuck
+
+Uses SQLite database storage.
 """
 
 import json
@@ -19,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 
 class FailureType(Enum):
@@ -50,15 +53,18 @@ class RecoveryManager:
     - Rollback to working states
     - Detect circular fixes (same approach repeatedly)
     - Escalate stuck subtasks for human intervention
+
+    Supports both JSON file storage (legacy) and SQLite database storage.
     """
 
-    def __init__(self, spec_dir: Path, project_dir: Path):
+    def __init__(self, spec_dir: Path, project_dir: Path, spec_id: Optional[str] = None):
         """
         Initialize recovery manager.
 
         Args:
             spec_dir: Spec directory containing memory/
             project_dir: Root project directory for git operations
+            spec_id: Spec ID for SQLite storage (derived from spec_dir if not provided)
         """
         self.spec_dir = spec_dir
         self.project_dir = project_dir
@@ -66,15 +72,21 @@ class RecoveryManager:
         self.attempt_history_file = self.memory_dir / "attempt_history.json"
         self.build_commits_file = self.memory_dir / "build_commits.json"
 
-        # Ensure memory directory exists
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        # Derive spec_id from spec_dir if not provided
+        self.spec_id = spec_id or spec_dir.name
 
-        # Initialize files if they don't exist
-        if not self.attempt_history_file.exists():
-            self._init_attempt_history()
+        # SQLite repository (lazy-loaded)
+        self._recovery_repo = None
 
-        if not self.build_commits_file.exists():
-            self._init_build_commits()
+    @property
+    def recovery_repo(self):
+        """Get the SQLite recovery repository (lazy-loaded)."""
+        if self._recovery_repo is None:
+            from db import init_db_for_project
+            from db.repositories import RecoveryRepository
+            db = init_db_for_project(self.project_dir)
+            self._recovery_repo = RecoveryRepository(db, self.spec_id)
+        return self._recovery_repo
 
     def _init_attempt_history(self) -> None:
         """Initialize the attempt history file."""
@@ -193,9 +205,7 @@ class RecoveryManager:
         Returns:
             Number of attempts
         """
-        history = self._load_attempt_history()
-        subtask_data = history["subtasks"].get(subtask_id, {})
-        return len(subtask_data.get("attempts", []))
+        return self.recovery_repo.get_attempt_count(subtask_id)
 
     def record_attempt(
         self,
@@ -215,29 +225,14 @@ class RecoveryManager:
             approach: Description of the approach taken
             error: Error message if failed
         """
-        history = self._load_attempt_history()
-
-        # Initialize subtask entry if it doesn't exist
-        if subtask_id not in history["subtasks"]:
-            history["subtasks"][subtask_id] = {"attempts": [], "status": "pending"}
-
-        # Add the attempt
-        attempt = {
-            "session": session,
-            "timestamp": datetime.now().isoformat(),
-            "approach": approach,
-            "success": success,
-            "error": error,
-        }
-        history["subtasks"][subtask_id]["attempts"].append(attempt)
-
-        # Update status
-        if success:
-            history["subtasks"][subtask_id]["status"] = "completed"
-        else:
-            history["subtasks"][subtask_id]["status"] = "failed"
-
-        self._save_attempt_history(history)
+        attempt_number = self.get_attempt_count(subtask_id) + 1
+        self.recovery_repo.record_attempt(
+            subtask_id=subtask_id,
+            attempt_number=attempt_number,
+            success=success,
+            error=error,
+            recovery_action=approach,
+        )
 
     def is_circular_fix(self, subtask_id: str, current_approach: str) -> bool:
         """
@@ -389,8 +384,8 @@ class RecoveryManager:
         Returns:
             Commit hash or None
         """
-        commits = self._load_build_commits()
-        return commits.get("last_good_commit")
+        commit = self.recovery_repo.get_last_good_commit()
+        return commit["commit_hash"] if commit else None
 
     def record_good_commit(self, commit_hash: str, subtask_id: str) -> None:
         """
@@ -400,18 +395,11 @@ class RecoveryManager:
             commit_hash: Git commit hash
             subtask_id: Subtask that was successfully completed
         """
-        commits = self._load_build_commits()
-
-        commit_record = {
-            "hash": commit_hash,
-            "subtask_id": subtask_id,
-            "timestamp": datetime.now().isoformat(),
-        }
-
-        commits["commits"].append(commit_record)
-        commits["last_good_commit"] = commit_hash
-
-        self._save_build_commits(commits)
+        self.recovery_repo.record_commit(
+            commit_hash=commit_hash,
+            subtask_id=subtask_id,
+            is_last_good=True,
+        )
 
     def rollback_to_commit(self, commit_hash: str) -> bool:
         """

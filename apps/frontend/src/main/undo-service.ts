@@ -111,8 +111,9 @@ import type {
   TaskStatus,
 } from '../shared/types';
 import { DEFAULT_UNDO_CONFIG, generateOperationDescription } from '../shared/types';
-import { getDatabaseConnection } from './database';
-import { getTaskStorage } from './task-storage';
+import { getGlobalDatabase } from './database';
+import { getProjectTaskStorage } from './task-storage';
+import { projectStore } from './project-store';
 
 // ============================================================================
 // Inverse Operation Generation Helpers
@@ -572,7 +573,7 @@ export class UndoService {
     }
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
 
       const sessionId = options?.sessionId ?? this.currentSessionId;
       const description = options?.description ?? generateOperationDescription(operation);
@@ -655,7 +656,7 @@ export class UndoService {
     }
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
 
       // Get the last undoable entry (at or before the redo pointer)
       const stmt = db.prepare(`
@@ -711,7 +712,7 @@ export class UndoService {
     }
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
 
       // Get the next redoable entry (after the redo pointer)
       const stmt = db.prepare(`
@@ -771,7 +772,7 @@ export class UndoService {
     }
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
 
       // Get entries that can be undone (at or before redo pointer)
       const effectivePointer = this.redoPointer === -1 ? 999999999 : this.redoPointer;
@@ -825,7 +826,7 @@ export class UndoService {
     }
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
 
       let stmt;
       let result;
@@ -873,7 +874,7 @@ export class UndoService {
     }
 
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
 
       const cutoffTime = new Date(Date.now() - this.config.sessionTimeoutMs).toISOString();
 
@@ -1096,7 +1097,7 @@ export class UndoService {
    */
   private getEntryById(id: number): UndoStackEntry | null {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = getGlobalDatabase().getConnection();
 
       const stmt = db.prepare('SELECT * FROM undo_stack WHERE id = ?');
       const row = stmt.get(id) as DatabaseUndoRow | undefined;
@@ -1113,6 +1114,41 @@ export class UndoService {
   }
 
   /**
+   * Get task storage for a project by looking up project path from projectId.
+   *
+   * @param projectId - The project ID
+   * @returns TaskStorage or null if project not found
+   */
+  private getStorageForProject(projectId: string): ReturnType<typeof getProjectTaskStorage> | null {
+    const project = projectStore.getProject(projectId);
+    if (!project) {
+      console.warn(`[UndoService] Project not found: ${projectId}`);
+      return null;
+    }
+    return getProjectTaskStorage(project.path);
+  }
+
+  /**
+   * Find task storage by searching all projects for a task.
+   * This is a fallback when projectId is not available in operation data.
+   *
+   * @param taskId - The task ID to find
+   * @returns Object with storage and projectId, or null if not found
+   */
+  private findStorageForTask(taskId: string): { storage: ReturnType<typeof getProjectTaskStorage>; projectId: string } | null {
+    const projects = projectStore.getProjects();
+    for (const project of projects) {
+      const storage = getProjectTaskStorage(project.path);
+      const task = storage.getTask(taskId);
+      if (task) {
+        return { storage, projectId: project.id };
+      }
+    }
+    console.warn(`[UndoService] Task not found in any project: ${taskId}`);
+    return null;
+  }
+
+  /**
    * Execute an undo operation
    *
    * This method dispatches the operation to the appropriate handler
@@ -1122,9 +1158,6 @@ export class UndoService {
    * @returns UndoResult indicating success or failure
    */
   private executeOperation(operation: UndoOperation): UndoResult {
-    // Import task storage for executing operations
-    const taskStorage = getTaskStorage();
-
     try {
       switch (operation.type) {
         case 'task_create':
@@ -1158,10 +1191,15 @@ export class UndoService {
    * Execute a task create operation (recreate a task)
    */
   private executeTaskCreate(operation: UndoOperation): UndoResult {
-    const taskStorage = getTaskStorage();
     const data = operation.data as TaskCreateData;
 
     try {
+      // Get storage for the project (snapshot has projectId)
+      const taskStorage = this.getStorageForProject(data.taskSnapshot.projectId);
+      if (!taskStorage) {
+        return { success: false, error: `Project not found: ${data.taskSnapshot.projectId}` };
+      }
+
       // Create the task from snapshot
       const task = taskStorage.createTask({
         id: data.taskSnapshot.id,
@@ -1187,9 +1225,15 @@ export class UndoService {
    * Execute a task delete operation
    */
   private executeTaskDelete(operation: UndoOperation): UndoResult {
-    const taskStorage = getTaskStorage();
+    const data = operation.data as TaskDeleteData;
 
     try {
+      // Get storage for the project (snapshot has projectId)
+      const taskStorage = this.getStorageForProject(data.taskSnapshot.projectId);
+      if (!taskStorage) {
+        return { success: false, error: `Project not found: ${data.taskSnapshot.projectId}` };
+      }
+
       const deleted = taskStorage.deleteTask(operation.taskId);
       if (!deleted) {
         return { success: false, error: `Task not found: ${operation.taskId}` };
@@ -1204,11 +1248,16 @@ export class UndoService {
    * Execute a task update operation
    */
   private executeTaskUpdate(operation: UndoOperation): UndoResult {
-    const taskStorage = getTaskStorage();
     const data = operation.data as TaskUpdateData;
 
     try {
-      const updated = taskStorage.updateTask(operation.taskId, {
+      // Find the task's project (update data doesn't include projectId)
+      const storageInfo = this.findStorageForTask(operation.taskId);
+      if (!storageInfo) {
+        return { success: false, error: `Task not found: ${operation.taskId}` };
+      }
+
+      const updated = storageInfo.storage.updateTask(operation.taskId, {
         [data.fieldName]: data.newValue,
       });
 
@@ -1226,11 +1275,16 @@ export class UndoService {
    * Execute a task status change operation
    */
   private executeTaskStatusChange(operation: UndoOperation): UndoResult {
-    const taskStorage = getTaskStorage();
     const data = operation.data as TaskStatusChangeData;
 
     try {
-      const updated = taskStorage.updateTask(operation.taskId, {
+      // Find the task's project (status change data doesn't include projectId)
+      const storageInfo = this.findStorageForTask(operation.taskId);
+      if (!storageInfo) {
+        return { success: false, error: `Task not found: ${operation.taskId}` };
+      }
+
+      const updated = storageInfo.storage.updateTask(operation.taskId, {
         status: data.newStatus,
       });
 
@@ -1246,13 +1300,23 @@ export class UndoService {
 
   /**
    * Execute a task move operation
+   * NOTE: Task move between projects with separate databases requires
+   * read from old project + create in new project + delete from old project.
+   * Currently this just updates the projectId field.
    */
   private executeTaskMove(operation: UndoOperation): UndoResult {
-    const taskStorage = getTaskStorage();
     const data = operation.data as TaskMoveData;
 
     try {
-      const updated = taskStorage.updateTask(operation.taskId, {
+      // Find the task in the old project (where it currently exists)
+      const storageInfo = this.findStorageForTask(operation.taskId);
+      if (!storageInfo) {
+        return { success: false, error: `Task not found: ${operation.taskId}` };
+      }
+
+      // For now, just update the projectId field in the same database
+      // TODO: Full cross-project move would require copying task between databases
+      const updated = storageInfo.storage.updateTask(operation.taskId, {
         projectId: data.newProjectId,
       });
 

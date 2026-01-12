@@ -17,7 +17,7 @@ import {
   getTaskWorktreeDir,
   findTaskWorktree,
 } from '../../worktree-paths';
-import { getTaskStorage } from '../../task-storage';
+import { getProjectTaskStorage } from '../../task-storage';
 
 /**
  * Read utility feature settings (for commit message, merge resolver) from settings file
@@ -1928,7 +1928,7 @@ export function registerWorktreeHandlers(
               // Persist the status change to SQLite database (single source of truth)
               // NOTE: JSON files are no longer written - SQLite is now the only persistence layer
               try {
-                const storage = getTaskStorage();
+                const storage = getProjectTaskStorage(project.path);
                 const updates: {
                   status: 'human_review' | 'done';
                   stagedInMainProject?: boolean;

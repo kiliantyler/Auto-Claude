@@ -9,7 +9,7 @@ import { projectStore } from '../../project-store';
 import { AgentManager } from '../../agent';
 import { getGitHubConfig, githubFetch } from './utils';
 import { createSpecForIssue } from './spec-utils';
-import { getTaskStorage } from '../../task-storage';
+import { getProjectTaskStorage } from '../../task-storage';
 
 /**
  * Import multiple GitHub issues as tasks
@@ -87,7 +87,7 @@ ${issue.body || 'No description provided.'}
           };
 
           try {
-            const taskStorage = getTaskStorage();
+            const taskStorage = getProjectTaskStorage(project.path);
             taskStorage.createTask(task);
             console.warn(`[GITHUB_IMPORT] Created task in SQLite: ${specData.specId}`);
             tasks.push(task);

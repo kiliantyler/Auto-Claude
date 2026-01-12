@@ -2,18 +2,19 @@
  * Task Storage Layer with SQLite CRUD Operations
  * ===============================================
  *
- * Provides database-backed task storage with dual-write support for safe migration.
+ * Provides database-backed task storage with project-local databases.
  *
  * Key Features:
  * - Create, read, update, delete operations for tasks
- * - Dual-write mode: writes to both SQLite and JSON (controlled by ENABLE_DUAL_WRITE env var)
+ * - Project-local databases: each project has its own SQLite database
  * - Prepared statements for SQL injection prevention
  * - Automatic serialization of TaskMetadata, subtasks, QA reports, etc.
  * - Database triggers automatically emit IPC events for real-time UI updates
  *
  * Usage:
  * ```typescript
- * const storage = new TaskStorage();
+ * // For project-specific tasks
+ * const storage = getProjectTaskStorage('/path/to/project');
  *
  * // Create task
  * storage.createTask(task);
@@ -33,20 +34,35 @@
  */
 
 import type { Task, TaskStatus, ReviewReason, TaskMetadata } from '../shared/types';
-import { getDatabaseConnection } from './database';
+import { getProjectDatabaseManager, type DatabaseConnection, type ProjectDatabaseConnection } from './database';
 
 /**
  * Task Storage Service
- * Handles task CRUD operations with SQLite database
+ * Handles task CRUD operations with project-local SQLite database.
+ *
+ * Each project has its own database at <project>/.auto-claude/tasks.db
+ * This database is shared between the Electron frontend and Python backend.
  */
 export class TaskStorage {
-  private readonly ENABLE_DUAL_WRITE: boolean;
+  private readonly dbConnection: ProjectDatabaseConnection;
+  private readonly projectPath: string;
 
-  constructor() {
-    // Disable dual-write by default (Phase 4 - SQLite-only mode)
-    // Set ENABLE_DUAL_WRITE=true to enable dual-write for debugging
-    this.ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE === 'true';
-    console.log(`[TaskStorage] Dual-write mode: ${this.ENABLE_DUAL_WRITE ? 'ENABLED' : 'DISABLED'}`);
+  /**
+   * Create a TaskStorage instance for a project.
+   *
+   * @param projectPath - Path to the project root directory (REQUIRED)
+   * @throws Error if projectPath is not provided
+   */
+  constructor(projectPath: string) {
+    if (!projectPath) {
+      throw new Error(
+        '[TaskStorage] projectPath is required. Use getProjectTaskStorage(projectPath) to get a TaskStorage instance.'
+      );
+    }
+
+    this.projectPath = projectPath;
+    this.dbConnection = getProjectDatabaseManager().getConnection(projectPath);
+    console.log(`[TaskStorage] Using project-local database: ${projectPath}`);
   }
 
   /**
@@ -72,7 +88,16 @@ export class TaskStorage {
    * ```
    */
   withTransaction<T>(fn: () => T): T {
-    return getDatabaseConnection().withTransaction(fn);
+    return this.dbConnection.withTransaction(fn);
+  }
+
+  /**
+   * Get the project path for this storage instance.
+   *
+   * @returns Project path
+   */
+  getProjectPath(): string {
+    return this.projectPath;
   }
 
   /**
@@ -83,7 +108,7 @@ export class TaskStorage {
    */
   createTask(task: Task): Task {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = this.dbConnection.getConnection();
 
       // Prepare metadata JSON (serialize complex fields)
       const metadataJson = JSON.stringify({
@@ -138,7 +163,7 @@ export class TaskStorage {
    */
   getTask(taskId: string): Task | null {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = this.dbConnection.getConnection();
 
       const stmt = db.prepare('SELECT * FROM tasks WHERE id = ?');
       const row = stmt.get(taskId) as DatabaseTaskRow | undefined;
@@ -162,7 +187,7 @@ export class TaskStorage {
    */
   getTaskBySpecId(specId: string): Task | null {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = this.dbConnection.getConnection();
 
       const stmt = db.prepare('SELECT * FROM tasks WHERE spec_id = ?');
       const row = stmt.get(specId) as DatabaseTaskRow | undefined;
@@ -187,7 +212,7 @@ export class TaskStorage {
    */
   updateTask(taskId: string, updates: Partial<Task>): Task | null {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = this.dbConnection.getConnection();
 
       // Get existing task
       const existingTask = this.getTask(taskId);
@@ -270,7 +295,7 @@ export class TaskStorage {
    */
   deleteTask(taskId: string): boolean {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = this.dbConnection.getConnection();
 
       const stmt = db.prepare('DELETE FROM tasks WHERE id = ?');
       const result = stmt.run(taskId);
@@ -298,7 +323,7 @@ export class TaskStorage {
    */
   listTasks(projectId?: string, filters?: TaskFilters): Task[] {
     try {
-      const db = getDatabaseConnection().getConnection();
+      const db = this.dbConnection.getConnection();
 
       // Build query dynamically based on filters
       let query = 'SELECT * FROM tasks';
@@ -432,44 +457,86 @@ export interface TaskFilters {
   excludeArchived?: boolean;
 }
 
-// Export singleton instance
-let _instance: TaskStorage | null = null;
+// Per-project storage instances
+const _projectStorages = new Map<string, TaskStorage>();
 
 /**
- * Get the singleton TaskStorage instance
+ * Get a TaskStorage instance for a specific project.
  *
- * @returns TaskStorage instance
+ * Uses project-local database at <project>/.auto-claude/tasks.db.
+ * Caches instances per project path.
+ *
+ * @param projectPath - Path to the project root directory
+ * @returns TaskStorage instance for the project
  */
-export function getTaskStorage(): TaskStorage {
-  if (!_instance) {
-    _instance = new TaskStorage();
+export function getProjectTaskStorage(projectPath: string): TaskStorage {
+  if (!projectPath) {
+    throw new Error('[TaskStorage] projectPath is required');
   }
-  return _instance;
+  if (!_projectStorages.has(projectPath)) {
+    _projectStorages.set(projectPath, new TaskStorage(projectPath));
+  }
+  return _projectStorages.get(projectPath)!;
 }
 
 /**
- * Execute a function within a transaction.
+ * Get a TaskStorage instance.
  *
- * Convenience wrapper around TaskStorage.withTransaction() using the singleton instance.
+ * @deprecated REMOVED - Tasks are now stored in project-local databases.
+ *             Use getProjectTaskStorage(projectPath) instead.
+ * @throws Error always - use getProjectTaskStorage(projectPath) instead
+ */
+export function getTaskStorage(): never {
+  throw new Error(
+    '[TaskStorage] getTaskStorage() is no longer supported. ' +
+    'Tasks are now stored in project-local databases. ' +
+    'Use getProjectTaskStorage(projectPath) instead.'
+  );
+}
+
+/**
+ * Clear all cached TaskStorage instances.
+ * Call this when closing the app or switching contexts.
+ */
+export function clearTaskStorageCaches(): void {
+  _projectStorages.clear();
+}
+
+/**
+ * Execute a function within a transaction for a project.
+ *
+ * Convenience wrapper around TaskStorage.withTransaction().
  * Automatically handles commit on success and rollback on error.
  *
  * CRITICAL: Do NOT use async/await inside the callback - better-sqlite3
  * will commit the transaction before awaits complete.
  *
+ * @param projectPath - Path to the project root directory
  * @param fn - Function to execute within transaction (must be synchronous)
  * @returns Result of the function
  *
  * @example
  * ```typescript
- * import { withTransaction } from './task-storage';
+ * import { withProjectTransaction } from './task-storage';
  *
- * withTransaction(() => {
+ * withProjectTransaction('/path/to/project', () => {
  *   // Multiple atomic operations
  *   storage.createTask(task1);
  *   storage.updateTask(task2.id, { status: 'completed' });
  * });
  * ```
  */
-export function withTransaction<T>(fn: () => T): T {
-  return getTaskStorage().withTransaction(fn);
+export function withProjectTransaction<T>(projectPath: string, fn: () => T): T {
+  return getProjectTaskStorage(projectPath).withTransaction(fn);
+}
+
+/**
+ * @deprecated Use withProjectTransaction(projectPath, fn) instead
+ * @throws Error always
+ */
+export function withTransaction<T>(_fn: () => T): never {
+  throw new Error(
+    '[TaskStorage] withTransaction() is no longer supported. ' +
+    'Use withProjectTransaction(projectPath, fn) instead.'
+  );
 }
