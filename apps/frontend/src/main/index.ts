@@ -38,6 +38,7 @@ import { initSentryMain } from './sentry';
 import { preWarmToolCache } from './cli-tool-manager';
 import { initializeClaudeProfileManager } from './claude-profile-manager';
 import { getDatabaseConnection, closeDatabaseConnection } from './database';
+import { getDatabaseEventPoller, stopDatabaseEventPoller } from './database-event-poller';
 import type { AppSettings } from '../shared/types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,6 +296,27 @@ app.whenReady().then(() => {
   // Must be done early (before any IPC handlers that use the database)
   initializeDatabase();
 
+  // Start database event poller for real-time updates
+  // Polls event_queue table and emits IPC events when tasks/projects change
+  const eventPoller = getDatabaseEventPoller();
+  eventPoller.start(100); // Poll every 100ms for <100ms update latency
+
+  // Forward database events to all renderer windows
+  eventPoller.on('event', (ipcEventName: string, entityId: string) => {
+    // Send to all windows (supports multi-window scenarios)
+    const windows = BrowserWindow.getAllWindows();
+    for (const window of windows) {
+      window.webContents.send(ipcEventName, entityId);
+    }
+  });
+
+  // Log any poller errors
+  eventPoller.on('error', (error: string) => {
+    console.error('[DatabaseEventPoller]', error);
+  });
+
+  console.log('[main] Database event poller started');
+
   // Set dock icon on macOS
   if (process.platform === 'darwin') {
     const iconPath = getIconPath();
@@ -481,6 +503,10 @@ app.on('before-quit', async () => {
   const usageMonitor = getUsageMonitor();
   usageMonitor.stop();
   console.warn('[main] Usage monitor stopped');
+
+  // Stop database event poller before closing connection
+  stopDatabaseEventPoller();
+  console.warn('[main] Database event poller stopped');
 
   // Close database connection
   closeDatabaseConnection();

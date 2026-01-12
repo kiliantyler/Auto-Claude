@@ -8,7 +8,8 @@ import { projectStore } from '../../project-store';
 import { titleGenerator } from '../../title-generator';
 import { AgentManager } from '../../agent';
 import { findTaskAndProject } from './shared';
-import { fileWatcher } from '../../file-watcher';
+// File watcher replaced by database event poller (see database-event-poller.ts)
+// import { fileWatcher } from '../../file-watcher';
 import { findTaskWorktree } from '../../worktree-paths';
 import { getToolPath } from '../../cli-tool-manager';
 import { getTaskStorage } from '../../task-storage';
@@ -27,28 +28,8 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
       const tasks = projectStore.getTasks(projectId);
       console.warn('[IPC] TASK_LIST returning', tasks.length, 'tasks');
 
-      // Start file watchers for in-progress tasks so progress updates flow to the UI
-      // This handles the case where the app is restarted while a task is running
-      const project = projectStore.getProject(projectId);
-      if (project) {
-        const specsBaseDir = getSpecsDir(project.autoBuildPath);
-
-        for (const task of tasks) {
-          // Start watcher for tasks that are actively being worked on
-          if ((task.status === 'in_progress' || task.status === 'ai_review') && !fileWatcher.isWatching(task.id)) {
-            const specDir = path.join(project.path, specsBaseDir, task.specId);
-
-            // Check for worktree path (where actual changes happen during builds)
-            const worktreePath = findTaskWorktree(project.path, task.specId);
-            const worktreeSpecDir = worktreePath
-              ? path.join(worktreePath, specsBaseDir, task.specId)
-              : undefined;
-
-            console.warn(`[TASK_LIST] Starting file watcher for in-progress task: ${task.id}`);
-            fileWatcher.watch(task.id, specDir, worktreeSpecDir);
-          }
-        }
-      }
+      // Database event poller now handles real-time updates automatically
+      // No need to manually start file watchers - database triggers emit IPC events
 
       return { success: true, data: tasks };
     }
@@ -268,13 +249,9 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
       }
 
       try {
-        // 1. Stop file watcher for this task
-        if (fileWatcher.isWatching(taskId)) {
-          console.warn(`[TASK_DELETE] Stopping file watcher for task: ${taskId}`);
-          await fileWatcher.unwatch(taskId);
-        }
+        // Database event poller handles events automatically - no manual cleanup needed
 
-        // 2. Find and remove worktree if it exists
+        // 1. Find and remove worktree if it exists
         // First try the standard path lookup
         let worktreePath = findTaskWorktree(project.path, task.specId);
         let branchName: string | null = null;
