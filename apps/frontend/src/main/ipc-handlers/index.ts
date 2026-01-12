@@ -35,6 +35,7 @@ import { registerProfileHandlers } from './profile-handlers';
 import { registerTerminalWorktreeIpcHandlers } from './terminal';
 import { registerHistoryHandlers } from './history-handlers';
 import { registerSearchHandlers } from './search-handlers';
+import { registerUndoHandlers } from './undo-handlers';
 import { notificationService } from '../notification-service';
 
 /**
@@ -126,6 +127,9 @@ export function setupIpcHandlers(
   // Search handlers (full-text search using FTS5)
   registerSearchHandlers();
 
+  // Undo/Redo handlers (task operation undo/redo)
+  registerUndoHandlers();
+
   console.warn('[IPC] All handler modules registered successfully');
 }
 
@@ -154,5 +158,6 @@ export {
   registerMcpHandlers,
   registerProfileHandlers,
   registerHistoryHandlers,
-  registerSearchHandlers
+  registerSearchHandlers,
+  registerUndoHandlers
 };
