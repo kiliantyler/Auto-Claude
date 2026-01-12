@@ -67,6 +67,7 @@ import type { Task, Project, ColorTheme, SearchResult } from '../shared/types';
 import { ProjectTabBar } from './components/ProjectTabBar';
 import { AddProjectModal } from './components/AddProjectModal';
 import { ViewStateProvider } from './contexts/ViewStateContext';
+import { UndoRedoButtons } from './components/undo/UndoRedoButtons';
 
 // Wrapper component for ProjectTabBar
 interface ProjectTabBarWithContextProps {
@@ -837,6 +838,13 @@ export function App() {
                 )}
               </DragOverlay>
             </DndContext>
+          )}
+
+          {/* Toolbar with undo/redo buttons */}
+          {selectedProject && (
+            <div className="flex items-center justify-end px-2 py-1 border-b border-border bg-background/95">
+              <UndoRedoButtons compact />
+            </div>
           )}
 
           {/* Main content area */}
