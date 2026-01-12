@@ -44,13 +44,13 @@ export function UndoRedoButtons({ className = '', compact = true }: UndoRedoButt
     const loadState = async () => {
       try {
         // Check if undo feature is enabled
-        const enabledResult = await window.api.isEnabled();
+        const enabledResult = await window.electronAPI.isEnabled();
         if (enabledResult.success && enabledResult.data !== undefined) {
           setIsEnabled(enabledResult.data);
         }
 
         // Get current undo/redo state
-        const historyResult = await window.api.getHistory();
+        const historyResult = await window.electronAPI.getHistory();
         if (historyResult.success && historyResult.data) {
           setState(historyResult.data);
         }
@@ -67,7 +67,7 @@ export function UndoRedoButtons({ className = '', compact = true }: UndoRedoButt
   useEffect(() => {
     if (!isEnabled) return;
 
-    const unsubscribe = window.api.onStateChanged((newState: UndoStackState) => {
+    const unsubscribe = window.electronAPI.onStateChanged((newState: UndoStackState) => {
       setState(newState);
     });
 
@@ -82,7 +82,7 @@ export function UndoRedoButtons({ className = '', compact = true }: UndoRedoButt
 
     try {
       setState(prev => ({ ...prev, isProcessing: true }));
-      const result = await window.api.undo();
+      const result = await window.electronAPI.undo();
       if (!result.success) {
         // Could show toast notification here
       }
@@ -97,7 +97,7 @@ export function UndoRedoButtons({ className = '', compact = true }: UndoRedoButt
 
     try {
       setState(prev => ({ ...prev, isProcessing: true }));
-      const result = await window.api.redo();
+      const result = await window.electronAPI.redo();
       if (!result.success) {
         // Could show toast notification here
       }

@@ -122,7 +122,9 @@ export function useProjectMigrationStatus(
  * ```
  */
 export function useIsAnyMigrationRunning(): boolean {
-  return useMigrationStore((state) => state.isAnyMigrationRunning());
+  return useMigrationStore((state) =>
+    Object.values(state.migrations).some((m) => m.status === 'running')
+  );
 }
 
 /**
@@ -145,5 +147,7 @@ export function useIsAnyMigrationRunning(): boolean {
  * ```
  */
 export function useHasAnyMigrationFailed(): boolean {
-  return useMigrationStore((state) => state.hasAnyMigrationFailed());
+  return useMigrationStore((state) =>
+    Object.values(state.migrations).some((m) => m.status === 'failed')
+  );
 }

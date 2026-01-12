@@ -22,7 +22,7 @@ for (const envPath of possibleEnvPaths) {
 
 import { app, BrowserWindow, shell, nativeImage, session, screen } from 'electron';
 import { join } from 'path';
-import { accessSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { accessSync, readFileSync, writeFileSync, rmSync, readdirSync } from 'fs';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import { setupIpcHandlers } from './ipc-setup';
 import { AgentManager } from './agent';
@@ -191,25 +191,36 @@ async function detectAndMigrateProjects(): Promise<void> {
         continue;
       }
 
-      // Check if JSON files exist
-      const autoBuildDir = join(projectPath, '.auto-claude');
-      if (!existsSync(autoBuildDir)) {
-        console.log(`[Migration] No .auto-claude directory found for project: ${project.name}`);
+      // Check if specs directory exists with JSON files
+      const specsDir = join(projectPath, '.auto-claude', 'specs');
+      if (!existsSync(specsDir)) {
+        console.log(`[Migration] No specs directory found for project: ${project.name}`);
         continue;
       }
 
-      const jsonFiles = ['tasks.json', 'implementation_plan.json', 'task_logs.json'];
-      const foundFiles = jsonFiles.filter((file) =>
-        existsSync(join(autoBuildDir, file))
-      );
+      // Scan spec directories for JSON files that need migration
+      const specDirs = readdirSync(specsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
 
-      if (foundFiles.length === 0) {
-        console.log(`[Migration] No JSON files found for project: ${project.name}`);
+      const jsonFiles = ['task_metadata.json', 'implementation_plan.json', 'task_logs.json'];
+      let foundSpecs: string[] = [];
+
+      for (const specDir of specDirs) {
+        const specPath = join(specsDir, specDir);
+        const hasJsonFiles = jsonFiles.some((file) => existsSync(join(specPath, file)));
+        if (hasJsonFiles) {
+          foundSpecs.push(specDir);
+        }
+      }
+
+      if (foundSpecs.length === 0) {
+        console.log(`[Migration] No specs with JSON files found for project: ${project.name}`);
         continue;
       }
 
       // Trigger migration
-      console.log(`[Migration] Starting migration for project: ${project.name} (found: ${foundFiles.join(', ')})`);
+      console.log(`[Migration] Starting migration for project: ${project.name} (found ${foundSpecs.length} specs with JSON files)`);
 
       await worker.migrate(projectPath, (progress) => {
         // Send progress to renderer if window exists

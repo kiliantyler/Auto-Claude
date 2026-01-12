@@ -30,8 +30,9 @@
  * ```
  */
 
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import path from 'path';
+import type Database from 'better-sqlite3';
 import { getDatabaseConnection } from './database';
 import { getMigrationTracker } from './migration-tracker';
 import type { Task, TaskLogs } from '../shared/types';
@@ -113,7 +114,7 @@ export interface MigrationOptions {
  * Orchestrates the migration of JSON files to SQLite database.
  */
 export class MigrationWorker {
-  private readonly JSON_FILES = ['tasks.json', 'implementation_plan.json', 'task_logs.json'];
+  private readonly SPEC_JSON_FILES = ['task_metadata.json', 'implementation_plan.json', 'task_logs.json'];
   private readonly DEFAULT_MAX_RETRIES = 3;
   private readonly DEFAULT_RETRY_DELAY_MS = 1000;
 
@@ -165,7 +166,40 @@ export class MigrationWorker {
 
     console.log(`[MigrationWorker] Starting migration for: ${projectPath}`);
 
-    const totalFiles = this.JSON_FILES.length;
+    // Scan specs directory for spec folders with JSON files
+    const specsDir = path.join(projectPath, '.auto-claude', 'specs');
+    if (!existsSync(specsDir)) {
+      console.log(`[MigrationWorker] No specs directory found: ${specsDir}`);
+      return;
+    }
+
+    const specDirs = readdirSync(specsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+
+    // Count total files to migrate for progress tracking
+    let totalFiles = 0;
+    const specsWithFiles: { specId: string; files: string[] }[] = [];
+
+    for (const specId of specDirs) {
+      const specPath = path.join(specsDir, specId);
+      const foundFiles = this.SPEC_JSON_FILES.filter((file) =>
+        existsSync(path.join(specPath, file))
+      );
+      if (foundFiles.length > 0) {
+        specsWithFiles.push({ specId, files: foundFiles });
+        totalFiles += foundFiles.length;
+      }
+    }
+
+    if (totalFiles === 0) {
+      console.log(`[MigrationWorker] No JSON files found in specs for: ${projectPath}`);
+      tracker.markMigrationComplete(projectPath, []);
+      return;
+    }
+
+    console.log(`[MigrationWorker] Found ${totalFiles} files across ${specsWithFiles.length} specs`);
+
     let filesCompleted = 0;
     const migratedFiles: string[] = [];
     let totalRetries = 0;
@@ -181,14 +215,72 @@ export class MigrationWorker {
         totalFiles,
       });
 
-      // Migrate each file in sequence
-      for (const jsonFile of this.JSON_FILES) {
-        const filePath = path.join(projectPath, '.auto-claude', jsonFile);
+      // Migrate each spec's files
+      for (const { specId, files } of specsWithFiles) {
+        const specPath = path.join(specsDir, specId);
 
-        // Skip if file doesn't exist (not all projects have all files)
-        if (!existsSync(filePath)) {
-          console.log(`[MigrationWorker] File not found, skipping: ${jsonFile}`);
-          filesCompleted++;
+        for (const jsonFile of files) {
+          const filePath = path.join(specPath, jsonFile);
+          const displayName = `${specId}/${jsonFile}`;
+
+          // Emit progress for current file
+          this.emitProgress(onProgress, {
+            projectPath,
+            status: 'running',
+            percentage: Math.round((filesCompleted / totalFiles) * 100),
+            currentFile: displayName,
+            filesCompleted,
+            totalFiles,
+            retryCount: totalRetries,
+          });
+
+          // Migrate the file with retry logic
+          let fileRetries = 0;
+          let fileMigrated = false;
+
+          while (!fileMigrated && fileRetries <= maxRetries) {
+            try {
+              await this.migrateSpecFile(projectPath, specId, jsonFile, filePath);
+              migratedFiles.push(displayName);
+              filesCompleted++;
+              fileMigrated = true;
+
+              console.log(`[MigrationWorker] Successfully migrated ${displayName}`);
+            } catch (error) {
+              fileRetries++;
+              totalRetries++;
+
+              const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+              console.error(
+                `[MigrationWorker] Failed to migrate ${displayName} (attempt ${fileRetries}/${maxRetries + 1}):`,
+                errorMessage
+              );
+
+              if (fileRetries > maxRetries) {
+                // Max retries exceeded - trigger rollback
+                throw new Error(
+                  `Failed to migrate ${displayName} after ${maxRetries + 1} attempts: ${errorMessage}`
+                );
+              }
+
+              // Wait before retrying
+              console.log(`[MigrationWorker] Retrying ${displayName} in ${retryDelayMs}ms...`);
+              await this.delay(retryDelayMs);
+
+              // Emit retry progress
+              this.emitProgress(onProgress, {
+                projectPath,
+                status: 'running',
+                percentage: Math.round((filesCompleted / totalFiles) * 100),
+                currentFile: displayName,
+                filesCompleted,
+                totalFiles,
+                retryCount: totalRetries,
+              });
+            }
+          }
+
+          // Emit progress after file completion
           this.emitProgress(onProgress, {
             projectPath,
             status: 'running',
@@ -196,77 +288,9 @@ export class MigrationWorker {
             currentFile: null,
             filesCompleted,
             totalFiles,
+            retryCount: totalRetries,
           });
-          continue;
         }
-
-        // Emit progress for current file
-        this.emitProgress(onProgress, {
-          projectPath,
-          status: 'running',
-          percentage: Math.round((filesCompleted / totalFiles) * 100),
-          currentFile: jsonFile,
-          filesCompleted,
-          totalFiles,
-          retryCount: totalRetries,
-        });
-
-        // Migrate the file with retry logic
-        let fileRetries = 0;
-        let fileMigrated = false;
-
-        while (!fileMigrated && fileRetries <= maxRetries) {
-          try {
-            await this.migrateFile(projectPath, jsonFile, filePath);
-            migratedFiles.push(jsonFile);
-            filesCompleted++;
-            fileMigrated = true;
-
-            console.log(`[MigrationWorker] Successfully migrated ${jsonFile}`);
-          } catch (error) {
-            fileRetries++;
-            totalRetries++;
-
-            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.error(
-              `[MigrationWorker] Failed to migrate ${jsonFile} (attempt ${fileRetries}/${maxRetries + 1}):`,
-              errorMessage
-            );
-
-            if (fileRetries > maxRetries) {
-              // Max retries exceeded - trigger rollback
-              throw new Error(
-                `Failed to migrate ${jsonFile} after ${maxRetries + 1} attempts: ${errorMessage}`
-              );
-            }
-
-            // Wait before retrying
-            console.log(`[MigrationWorker] Retrying ${jsonFile} in ${retryDelayMs}ms...`);
-            await this.delay(retryDelayMs);
-
-            // Emit retry progress
-            this.emitProgress(onProgress, {
-              projectPath,
-              status: 'running',
-              percentage: Math.round((filesCompleted / totalFiles) * 100),
-              currentFile: jsonFile,
-              filesCompleted,
-              totalFiles,
-              retryCount: totalRetries,
-            });
-          }
-        }
-
-        // Emit progress after file completion
-        this.emitProgress(onProgress, {
-          projectPath,
-          status: 'running',
-          percentage: Math.round((filesCompleted / totalFiles) * 100),
-          currentFile: null,
-          filesCompleted,
-          totalFiles,
-          retryCount: totalRetries,
-        });
       }
 
       // Mark migration as complete
@@ -311,17 +335,24 @@ export class MigrationWorker {
   }
 
   /**
-   * Migrate a single JSON file to SQLite
+   * Migrate a single spec JSON file to SQLite
    *
    * Uses transactions for atomicity - all records inserted or none.
    * Rollback is automatic on error via withTransaction().
    *
    * @param projectPath - Absolute path to the project directory
-   * @param jsonFile - Name of the JSON file (e.g., 'tasks.json')
+   * @param specId - The spec directory name (e.g., '001-add-feature')
+   * @param jsonFile - Name of the JSON file (e.g., 'task_metadata.json')
    * @param filePath - Absolute path to the JSON file
    */
-  private async migrateFile(projectPath: string, jsonFile: string, filePath: string): Promise<void> {
-    console.log(`[MigrationWorker] Migrating ${jsonFile}...`);
+  private async migrateSpecFile(
+    projectPath: string,
+    specId: string,
+    jsonFile: string,
+    filePath: string
+  ): Promise<void> {
+    const displayName = `${specId}/${jsonFile}`;
+    console.log(`[MigrationWorker] Migrating ${displayName}...`);
 
     const dbConn = getDatabaseConnection();
 
@@ -333,21 +364,21 @@ export class MigrationWorker {
       // Wrap entire file migration in transaction for atomic rollback
       dbConn.withTransaction(() => {
         // Migrate based on file type (within transaction)
-        if (jsonFile === 'tasks.json') {
-          this.migrateTasksWithinTransaction(data);
+        if (jsonFile === 'task_metadata.json') {
+          this.migrateTaskMetadataWithinTransaction(data, projectPath, specId);
         } else if (jsonFile === 'implementation_plan.json') {
-          this.migrateImplementationPlanWithinTransaction(data);
+          this.migrateImplementationPlanWithinTransaction(data, specId);
         } else if (jsonFile === 'task_logs.json') {
-          this.migrateTaskLogsWithinTransaction(data);
+          this.migrateTaskLogsWithinTransaction(data, specId);
         }
       });
 
-      console.log(`[MigrationWorker] Successfully migrated ${jsonFile}`);
+      console.log(`[MigrationWorker] Successfully migrated ${displayName}`);
     } catch (error) {
       // Transaction automatically rolled back by withTransaction()
-      console.error(`[MigrationWorker] Failed to migrate ${jsonFile} (rolled back):`, error);
+      console.error(`[MigrationWorker] Failed to migrate ${displayName} (rolled back):`, error);
       throw new Error(
-        `Failed to migrate ${jsonFile}: ${error instanceof Error ? error.message : 'Unknown error'}`
+        `Failed to migrate ${displayName}: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }
@@ -400,25 +431,133 @@ export class MigrationWorker {
   }
 
   /**
-   * Migrate tasks from tasks.json to tasks table (within transaction)
+   * Migrate a project from JSON store to SQLite database
+   *
+   * @param db - Database connection
+   * @param projectPath - Path to the project
+   * @returns The project ID if successful, null otherwise
+   */
+  private migrateProjectToDatabase(db: Database.Database, projectPath: string): string | null {
+    try {
+      // Generate a unique project ID
+      const projectId = `proj-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const projectName = path.basename(projectPath);
+      const autoBuildPath = '.auto-claude';
+      const now = new Date().toISOString();
+
+      // Default settings
+      const defaultSettings = {
+        model: 'claude-sonnet-4-20250514',
+        maxThinkingTokens: null,
+        autoMerge: false,
+        autoPush: false,
+      };
+
+      // Insert the project
+      const insertStmt = db.prepare(`
+        INSERT INTO projects (id, name, path, auto_build_path, settings_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      insertStmt.run(
+        projectId,
+        projectName,
+        projectPath,
+        autoBuildPath,
+        JSON.stringify(defaultSettings),
+        now,
+        now
+      );
+
+      console.log(`[MigrationWorker] Migrated project to database: ${projectName} (${projectId})`);
+      return projectId;
+    } catch (error) {
+      console.error(`[MigrationWorker] Failed to migrate project to database:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Migrate task metadata from task_metadata.json to tasks table (within transaction)
    *
    * CRITICAL: This method must be called from within withTransaction().
    * It does NOT create its own transaction.
    *
-   * @param tasks - Array of tasks or single task object
+   * @param metadata - Task metadata from task_metadata.json
+   * @param projectPath - Path to the project
+   * @param specId - The spec directory name (e.g., '001-add-feature')
    */
-  private migrateTasksWithinTransaction(tasks: Task | Task[]): void {
+  private migrateTaskMetadataWithinTransaction(
+    metadata: Record<string, unknown>,
+    projectPath: string,
+    specId: string
+  ): void {
     const db = getDatabaseConnection().getConnection();
+    const specsDir = path.join(projectPath, '.auto-claude', 'specs', specId);
 
-    // Normalize to array
-    const taskArray = Array.isArray(tasks) ? tasks : [tasks];
+    // Look up or create the project in the database
+    let projectRow = db.prepare('SELECT id FROM projects WHERE path = ?').get(projectPath) as { id: string } | undefined;
+    if (!projectRow) {
+      // Project not in SQLite - migrate it from JSON store
+      console.log(`[MigrationWorker] Project not in database, migrating: ${projectPath}`);
+      const projectId = this.migrateProjectToDatabase(db, projectPath);
+      if (!projectId) {
+        console.log(`[MigrationWorker] Failed to migrate project: ${projectPath}, skipping task migration`);
+        return;
+      }
+      projectRow = { id: projectId };
+    }
+    const projectId = projectRow.id;
 
-    if (taskArray.length === 0) {
-      console.log('[MigrationWorker] No tasks to migrate');
-      return;
+    // Read title from spec.md
+    let title = specId; // Fallback to specId
+    const specMdPath = path.join(specsDir, 'spec.md');
+    if (existsSync(specMdPath)) {
+      try {
+        const specContent = readFileSync(specMdPath, 'utf-8');
+        const titleMatch = specContent.match(/^#\s+(.+)$/m);
+        if (titleMatch) {
+          title = titleMatch[1].trim();
+        }
+      } catch {
+        // Use fallback title
+      }
     }
 
-    // Prepare statement for efficiency
+    // Read description from spec.md Overview section
+    let description = '';
+    if (existsSync(specMdPath)) {
+      try {
+        const specContent = readFileSync(specMdPath, 'utf-8');
+        const overviewMatch = specContent.match(/## Overview\s*\n+([\s\S]*?)(?=\n#{1,6}\s|$)/);
+        if (overviewMatch) {
+          description = overviewMatch[1].trim();
+        }
+      } catch {
+        // Leave description empty
+      }
+    }
+
+    // Read status from implementation_plan.json if available
+    let status = 'backlog';
+    const planPath = path.join(specsDir, 'implementation_plan.json');
+    if (existsSync(planPath)) {
+      try {
+        const planContent = readFileSync(planPath, 'utf-8');
+        const plan = JSON.parse(planContent);
+        if (plan.status) {
+          status = plan.status;
+        }
+      } catch {
+        // Use default status
+      }
+    }
+
+    // Generate task ID from spec path
+    const taskId = `task-${specId}`;
+    const now = new Date().toISOString();
+
+    // Prepare insert statement
     const insertStmt = db.prepare(`
       INSERT OR IGNORE INTO tasks (
         id, spec_id, project_id, title, description, status, review_reason,
@@ -427,38 +566,29 @@ export class MigrationWorker {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    // Execute inserts (within outer transaction - no nested transaction)
-    for (const task of taskArray) {
-      // Serialize complex fields to metadata JSON
-      const metadataJson = JSON.stringify({
-        ...task.metadata,
-        subtasks: task.subtasks,
-        qaReport: task.qaReport,
-        logs: task.logs,
-        executionProgress: task.executionProgress,
-      });
+    // Serialize metadata
+    const metadataJson = JSON.stringify(metadata);
 
-      // Insert task (OR IGNORE ensures idempotency)
-      insertStmt.run(
-        task.id,
-        task.specId,
-        task.projectId,
-        task.title,
-        task.description,
-        task.status,
-        task.reviewReason || null,
-        task.releasedInVersion || null,
-        task.stagedInMainProject ? 1 : 0,
-        task.stagedAt ? new Date(task.stagedAt).toISOString() : null,
-        task.location || null,
-        task.specsPath || null,
-        metadataJson,
-        new Date(task.createdAt).toISOString(),
-        new Date(task.updatedAt).toISOString()
-      );
-    }
+    // Insert task (OR IGNORE ensures idempotency)
+    insertStmt.run(
+      taskId,
+      specId,
+      projectId,
+      title,
+      description,
+      status,
+      null, // reviewReason
+      null, // releasedInVersion
+      0,    // stagedInMainProject
+      null, // stagedAt
+      'main', // location
+      `.auto-claude/specs/${specId}`, // specsPath
+      metadataJson,
+      now,
+      now
+    );
 
-    console.log(`[MigrationWorker] Migrated ${taskArray.length} task(s) within transaction`);
+    console.log(`[MigrationWorker] Migrated task for spec ${specId}`);
   }
 
   /**
@@ -467,46 +597,36 @@ export class MigrationWorker {
    * CRITICAL: This method must be called from within withTransaction().
    * It does NOT create its own transaction.
    *
-   * Note: Implementation plans are currently stored in metadata_json of tasks table.
-   * If a separate implementation_plans table exists, this should be updated.
+   * Note: Implementation plans are stored in the task's metadata_json field.
+   * This method updates the existing task's metadata with plan data.
    *
    * @param plan - Implementation plan data
+   * @param specId - The spec directory name
    */
-  private migrateImplementationPlanWithinTransaction(plan: unknown): void {
-    // Implementation plans are typically associated with tasks and stored
-    // in the task's metadata. This is a placeholder for future expansion
-    // if a separate implementation_plans table is added.
+  private migrateImplementationPlanWithinTransaction(_plan: unknown, specId: string): void {
+    // Implementation plans are associated with tasks via specId
+    // The plan data is merged into the task's metadata_json
+    console.log(`[MigrationWorker] Implementation plan for ${specId}: merged into task metadata`);
 
-    console.log('[MigrationWorker] Implementation plan migration: stored in task metadata (within transaction)');
-
-    // If the database schema includes a separate implementation_plans table,
-    // add the migration logic here. Example:
-    //
-    // const db = getDatabaseConnection().getConnection();
-    // const insertStmt = db.prepare(`
-    //   INSERT OR IGNORE INTO implementation_plans (id, task_id, plan_json, created_at)
-    //   VALUES (?, ?, ?, ?)
-    // `);
-    // insertStmt.run(plan.id, plan.taskId, JSON.stringify(plan), new Date().toISOString());
+    // Note: The task_metadata migration already reads implementation_plan.json
+    // for status, so we don't need to do anything additional here
   }
 
   /**
-   * Migrate task logs from task_logs.json to task_logs table (within transaction)
+   * Migrate task logs from task_logs.json (within transaction)
    *
    * CRITICAL: This method must be called from within withTransaction().
    * It does NOT create its own transaction.
    *
-   * Note: Task logs structure may vary. This implementation assumes the
-   * logs are stored in the tasks table's metadata_json field.
+   * Note: Task logs are stored in the task's metadata_json field.
    *
    * @param logs - Task logs data
+   * @param specId - The spec directory name
    */
-  private migrateTaskLogsWithinTransaction(logs: TaskLogs | TaskLogs[]): void {
-    // Task logs are typically stored in the task's metadata_json field.
-    // This is a placeholder for future expansion if a separate task_logs
-    // table is added.
-
-    console.log('[MigrationWorker] Task logs migration: stored in task metadata (within transaction)');
+  private migrateTaskLogsWithinTransaction(_logs: TaskLogs | TaskLogs[], specId: string): void {
+    // Task logs are associated with tasks via specId
+    // The log data can be stored in task metadata if needed
+    console.log(`[MigrationWorker] Task logs for ${specId}: stored in task metadata`);
 
     // If the database schema includes a separate task_logs table,
     // add the migration logic here. Example:

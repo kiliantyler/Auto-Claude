@@ -6,6 +6,7 @@
  */
 import * as React from 'react';
 import { Loader2 } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../lib/utils';
 import { Progress } from './ui/progress';
 import { Card, CardContent } from './ui/card';
@@ -36,7 +37,13 @@ interface MigrationProgressProps {
  */
 export const MigrationProgress: React.FC<MigrationProgressProps> = ({ className }) => {
   const isRunning = useIsAnyMigrationRunning();
-  const runningMigrations = useMigrationStore((state) => state.getRunningMigrations());
+  const runningMigrations = useMigrationStore(
+    useShallow((state) =>
+      Object.keys(state.migrations).filter(
+        (path) => state.migrations[path].status === 'running'
+      )
+    )
+  );
   const migrations = useMigrationStore((state) => state.migrations);
 
   // Only render if there's an active migration
