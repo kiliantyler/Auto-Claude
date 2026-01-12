@@ -11,6 +11,7 @@ import { findTaskAndProject } from './shared';
 import { fileWatcher } from '../../file-watcher';
 import { findTaskWorktree } from '../../worktree-paths';
 import { getToolPath } from '../../cli-tool-manager';
+import { getTaskStorage } from '../../task-storage';
 
 /**
  * Register task CRUD (Create, Read, Update, Delete) handlers
@@ -222,6 +223,17 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
         updatedAt: new Date()
       };
 
+      // DUAL-WRITE: Write to SQLite FIRST (Phase 1 migration)
+      // JSON files have already been written above for safety
+      try {
+        const taskStorage = getTaskStorage();
+        taskStorage.createTask(task);
+        console.warn(`[TASK_CREATE] Written to SQLite database: ${task.id}`);
+      } catch (dbError) {
+        console.error('[TASK_CREATE] Failed to write to SQLite (continuing with JSON-only):', dbError);
+        // Continue - JSON files are already written, so task creation succeeds
+      }
+
       // Invalidate cache since a new task was created
       projectStore.invalidateTasksCache(projectId);
 
@@ -392,7 +404,17 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
           console.warn(`[TASK_DELETE] Deleted additional spec path: ${task.specsPath}`);
         }
 
-        // 6. Invalidate cache since a task was deleted
+        // 6. DUAL-WRITE: Delete from SQLite database (Phase 1 migration)
+        try {
+          const taskStorage = getTaskStorage();
+          taskStorage.deleteTask(taskId);
+          console.warn(`[TASK_DELETE] Deleted from SQLite database: ${taskId}`);
+        } catch (dbError) {
+          console.error('[TASK_DELETE] Failed to delete from SQLite (continuing):', dbError);
+          // Continue - JSON files are already deleted
+        }
+
+        // 7. Invalidate cache since a task was deleted
         projectStore.invalidateTasksCache(project.id);
 
         return { success: true };
@@ -582,6 +604,21 @@ export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
           metadata: updatedMetadata,
           updatedAt: new Date()
         };
+
+        // DUAL-WRITE: Write to SQLite FIRST (Phase 1 migration)
+        // JSON files have already been updated above for safety
+        try {
+          const taskStorage = getTaskStorage();
+          taskStorage.updateTask(taskId, {
+            title: finalTitle,
+            description: updates.description,
+            metadata: updatedMetadata
+          });
+          console.warn(`[TASK_UPDATE] Updated in SQLite database: ${taskId}`);
+        } catch (dbError) {
+          console.error('[TASK_UPDATE] Failed to update in SQLite (continuing with JSON-only):', dbError);
+          // Continue - JSON files are already updated
+        }
 
         // Invalidate cache since a task was updated
         projectStore.invalidateTasksCache(project.id);
