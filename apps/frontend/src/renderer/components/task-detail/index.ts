@@ -6,5 +6,6 @@ export { TaskActions } from './TaskActions';
 export { TaskWarnings } from './TaskWarnings';
 export { TaskSubtasks } from './TaskSubtasks';
 export { TaskLogs } from './TaskLogs';
+export { TaskHistory } from './TaskHistory';
 export { TaskReview } from './TaskReview';
 export { useTaskDetail } from './hooks/useTaskDetail';
