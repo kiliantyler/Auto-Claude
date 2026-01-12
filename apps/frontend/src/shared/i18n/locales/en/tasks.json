@@ -96,6 +96,9 @@
       "qa": "QA"
     }
   },
+  "history": {
+    "tab": "History"
+  },
   "files": {
     "title": "Files",
     "tab": "Files",
