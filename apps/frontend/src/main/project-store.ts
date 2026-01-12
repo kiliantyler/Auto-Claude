@@ -172,12 +172,12 @@ export class ProjectStore {
         existing.autoBuildPath = '';
         existing.updatedAt = new Date();
 
-        // Dual-write: Update both JSON and database
+        // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
         if (this.ENABLE_DUAL_WRITE) {
           this.save();
           this.writeProjectToDatabase(existing);
         } else {
-          this.save();
+          this.writeProjectToDatabase(existing);
         }
       }
       return existing;
@@ -199,13 +199,13 @@ export class ProjectStore {
       updatedAt: new Date()
     };
 
-    // Dual-write: Write to both JSON and database
+    // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
     this.data.projects.push(project);
     if (this.ENABLE_DUAL_WRITE) {
       this.save();
       this.writeProjectToDatabase(project);
     } else {
-      this.save();
+      this.writeProjectToDatabase(project);
     }
 
     return project;
@@ -220,12 +220,12 @@ export class ProjectStore {
       project.autoBuildPath = autoBuildPath;
       project.updatedAt = new Date();
 
-      // Dual-write: Update both JSON and database
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
       if (this.ENABLE_DUAL_WRITE) {
         this.save();
         this.writeProjectToDatabase(project);
       } else {
-        this.save();
+        this.writeProjectToDatabase(project);
       }
     }
     return project;
@@ -239,12 +239,12 @@ export class ProjectStore {
     if (index !== -1) {
       this.data.projects.splice(index, 1);
 
-      // Dual-write: Delete from both JSON and database
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
       if (this.ENABLE_DUAL_WRITE) {
         this.save();
         this.deleteProjectFromDatabase(projectId);
       } else {
-        this.save();
+        this.deleteProjectFromDatabase(projectId);
       }
       return true;
     }
@@ -335,19 +335,19 @@ export class ProjectStore {
     }
 
     if (hasChanges) {
-      // Dual-write: Update both JSON and database
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
       if (this.ENABLE_DUAL_WRITE) {
         this.save();
-        // Update all modified projects in database
-        for (const projectId of resetProjectIds) {
-          const project = this.data.projects.find((p) => p.id === projectId);
-          if (project) {
-            this.writeProjectToDatabase(project);
-          }
-        }
-      } else {
-        this.save();
       }
+
+      // Update all modified projects in database
+      for (const projectId of resetProjectIds) {
+        const project = this.data.projects.find((p) => p.id === projectId);
+        if (project) {
+          this.writeProjectToDatabase(project);
+        }
+      }
+
       console.warn(`[ProjectStore] Reset ${resetProjectIds.length} project(s) due to missing .auto-claude folder`);
     }
 
@@ -373,12 +373,12 @@ export class ProjectStore {
       project.settings = { ...project.settings, ...settings };
       project.updatedAt = new Date();
 
-      // Dual-write: Update both JSON and database
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
       if (this.ENABLE_DUAL_WRITE) {
         this.save();
         this.writeProjectToDatabase(project);
       } else {
-        this.save();
+        this.writeProjectToDatabase(project);
       }
     }
     return project;
