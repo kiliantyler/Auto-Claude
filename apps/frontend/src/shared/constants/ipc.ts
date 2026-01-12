@@ -538,4 +538,16 @@ export const IPC_CHANNELS = {
   SEARCH_CLEAR_RECENT: 'search:clear-recent',      // Clear recent search history
   SEARCH_REBUILD_INDEX: 'search:rebuild-index',    // Rebuild FTS5 index (maintenance)
   SEARCH_VERIFY_FTS5: 'search:verify-fts5',        // Verify FTS5 is available in SQLite
+
+  // Undo/Redo operations (task change history)
+  UNDO_UNDO: 'undo:undo',                          // Undo the last task change
+  UNDO_REDO: 'undo:redo',                          // Redo a previously undone change
+  UNDO_CAN_UNDO: 'undo:can-undo',                  // Check if undo is available
+  UNDO_CAN_REDO: 'undo:can-redo',                  // Check if redo is available
+  UNDO_GET_HISTORY: 'undo:get-history',            // Get undo/redo stack history
+  UNDO_CLEAR_HISTORY: 'undo:clear-history',        // Clear undo/redo history
+  UNDO_IS_ENABLED: 'undo:is-enabled',              // Check if undo feature is enabled
+
+  // Undo/Redo events (main -> renderer)
+  UNDO_STATE_CHANGED: 'undo:state-changed',        // Event: undo/redo state changed
 } as const;
