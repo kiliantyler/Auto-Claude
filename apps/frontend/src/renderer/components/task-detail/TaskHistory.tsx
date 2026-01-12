@@ -114,7 +114,8 @@ export function TaskHistory({ task }: TaskHistoryProps) {
         const result = await window.electronAPI.getTaskHistory(task.id);
         if (isMounted) {
           if (result.success && result.data) {
-            setHistoryEntries(result.data);
+            // result.data is HistoryQueryResult with entries array
+            setHistoryEntries(result.data.entries || []);
           } else {
             setError(result.error || t('history.loadError', 'Failed to load history'));
           }
