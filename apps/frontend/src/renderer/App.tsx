@@ -57,6 +57,7 @@ import { useTaskStore, loadTasks } from './stores/task-store';
 import { useSettingsStore, loadSettings, loadProfiles } from './stores/settings-store';
 import { useClaudeProfileStore } from './stores/claude-profile-store';
 import { useTerminalStore, restoreTerminalSessions } from './stores/terminal-store';
+import { useUndoStore, performUndo, performRedo } from './stores/undo-store';
 import { initializeGitHubListeners } from './stores/github';
 import { initDownloadProgressListener } from './stores/download-store';
 import { GlobalDownloadIndicator } from './components/GlobalDownloadIndicator';
@@ -120,6 +121,11 @@ export function App() {
 
   // Claude Profile state (OAuth)
   const claudeProfiles = useClaudeProfileStore((state) => state.profiles);
+
+  // Undo/Redo state
+  const canUndo = useUndoStore((state) => state.canUndo);
+  const canRedo = useUndoStore((state) => state.canRedo);
+  const isUndoProcessing = useUndoStore((state) => state.isProcessing);
 
   // UI State
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
@@ -323,7 +329,7 @@ export function App() {
     }
   }, [selectedProject, skippedInitProjectId, isInitializing, initSuccess]);
 
-  // Global keyboard shortcuts: Cmd/Ctrl+T to add project, Cmd/Ctrl+K to open search
+  // Global keyboard shortcuts: Cmd/Ctrl+T to add project, Cmd/Ctrl+K to open search, Cmd/Ctrl+Z to undo, Cmd/Ctrl+Shift+Z to redo
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
       // Skip if in input fields
@@ -339,6 +345,24 @@ export function App() {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
         setIsGlobalSearchOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl+Shift+Z: Redo (check before undo since it also uses Z)
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (canRedo && !isUndoProcessing) {
+          performRedo();
+        }
+        return;
+      }
+
+      // Cmd/Ctrl+Z: Undo
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (canUndo && !isUndoProcessing) {
+          performUndo();
+        }
         return;
       }
 
@@ -367,7 +391,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeView, openProjectTab]);
+  }, [activeView, openProjectTab, canUndo, canRedo, isUndoProcessing]);
 
   // Load tasks when project changes
   useEffect(() => {
