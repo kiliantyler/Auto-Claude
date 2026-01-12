@@ -7,5 +7,7 @@ export { TaskWarnings } from './TaskWarnings';
 export { TaskSubtasks } from './TaskSubtasks';
 export { TaskLogs } from './TaskLogs';
 export { TaskHistory } from './TaskHistory';
+export { HistoryEntry, DiffSection, FieldDiff } from './HistoryEntry';
+export type { HistoryEntryProps, DiffSectionProps, FieldDiffProps } from './HistoryEntry';
 export { TaskReview } from './TaskReview';
 export { useTaskDetail } from './hooks/useTaskDetail';
