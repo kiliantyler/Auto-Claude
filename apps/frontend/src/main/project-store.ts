@@ -385,8 +385,78 @@ export class ProjectStore {
   }
 
   /**
-   * Get tasks for a project by scanning specs directory
-   * Implements caching with 3-second TTL to prevent excessive worktree scanning
+   * Read tasks from SQLite database
+   * Used by read operations to query database instead of scanning directories
+   */
+  private readTasksFromDatabase(projectId: string): Task[] {
+    try {
+      const db = getDatabaseConnection().getConnection();
+      const stmt = db.prepare('SELECT * FROM tasks WHERE project_id = ? ORDER BY updated_at DESC');
+      const rows = stmt.all(projectId) as Array<{
+        id: string;
+        spec_id: string;
+        project_id: string;
+        title: string;
+        description: string;
+        status: string;
+        review_reason: string | null;
+        released_in_version: string | null;
+        staged_in_main_project: number;
+        staged_at: string | null;
+        location: string | null;
+        specs_path: string | null;
+        metadata_json: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+
+      return rows.map((row) => {
+        // Parse metadata JSON
+        const metadataWithExtras = JSON.parse(row.metadata_json) as {
+          subtasks?: Task['subtasks'];
+          qaReport?: Task['qaReport'];
+          logs?: Task['logs'];
+          executionProgress?: Task['executionProgress'];
+          sourceType?: string;
+          archivedAt?: string;
+          archivedInVersion?: string;
+        };
+
+        // Extract nested fields from metadata JSON
+        const { subtasks, qaReport, logs, executionProgress, ...metadata } = metadataWithExtras;
+
+        return {
+          id: row.id,
+          specId: row.spec_id,
+          projectId: row.project_id,
+          title: row.title,
+          description: row.description,
+          status: row.status as TaskStatus,
+          reviewReason: row.review_reason as ReviewReason | undefined,
+          releasedInVersion: row.released_in_version || undefined,
+          stagedInMainProject: row.staged_in_main_project === 1,
+          stagedAt: row.staged_at || undefined,
+          location: row.location as 'main' | 'worktree' | undefined,
+          specsPath: row.specs_path || undefined,
+          subtasks: subtasks || [],
+          qaReport: qaReport,
+          logs: logs || [],
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+          executionProgress: executionProgress,
+          createdAt: new Date(row.created_at),
+          updatedAt: new Date(row.updated_at),
+        };
+      });
+    } catch (error) {
+      console.error('[ProjectStore] Failed to read tasks from database:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get tasks for a project from SQLite database
+   * Implements caching with 3-second TTL to prevent excessive database queries
+   * Falls back to directory scanning if database is empty (during migration)
    */
   getTasks(projectId: string): Task[] {
     // Check cache first
@@ -398,27 +468,56 @@ export class ProjectStore {
       return cached.tasks;
     }
 
-    console.warn('[ProjectStore] getTasks called with projectId:', projectId, cached ? '(cache expired)' : '(cache miss)');
+    console.debug('[ProjectStore] getTasks called with projectId:', projectId, cached ? '(cache expired)' : '(cache miss)');
     const project = this.getProject(projectId);
     if (!project) {
       console.warn('[ProjectStore] Project not found for id:', projectId);
       return [];
     }
-    console.warn('[ProjectStore] Found project:', project.name, 'autoBuildPath:', project.autoBuildPath);
 
+    let tasks: Task[] = [];
+
+    if (this.ENABLE_DUAL_WRITE) {
+      // Phase 1: Read from SQLite with fallback to directory scanning
+      const dbTasks = this.readTasksFromDatabase(projectId);
+      if (dbTasks.length > 0) {
+        tasks = dbTasks;
+        console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from SQLite database');
+      } else {
+        // Fallback to directory scanning if database is empty
+        console.warn('[ProjectStore] Database is empty, falling back to directory scanning');
+        tasks = this.scanTasksFromDirectory(project, projectId);
+      }
+    } else {
+      // Phase 2+: Directory scanning still available as backup
+      console.debug('[ProjectStore] Using directory scanning (dual-write disabled)');
+      tasks = this.scanTasksFromDirectory(project, projectId);
+    }
+
+    // Update cache
+    this.tasksCache.set(projectId, { tasks, timestamp: now });
+
+    return tasks;
+  }
+
+  /**
+   * Scan tasks from directory (legacy method, kept for fallback during migration)
+   * This method scans the specs directory and worktrees to load tasks from JSON files
+   */
+  private scanTasksFromDirectory(project: Project, projectId: string): Task[] {
     const allTasks: Task[] = [];
     const specsBaseDir = getSpecsDir(project.autoBuildPath);
 
     // 1. Scan main project specs directory (source of truth for task existence)
     const mainSpecsDir = path.join(project.path, specsBaseDir);
     const mainSpecIds = new Set<string>();
-    console.warn('[ProjectStore] Main specsDir:', mainSpecsDir, 'exists:', existsSync(mainSpecsDir));
+    console.debug('[ProjectStore] Main specsDir:', mainSpecsDir, 'exists:', existsSync(mainSpecsDir));
     if (existsSync(mainSpecsDir)) {
       const mainTasks = this.loadTasksFromSpecsDir(mainSpecsDir, project.path, 'main', projectId, specsBaseDir);
       allTasks.push(...mainTasks);
       // Track which specs exist in main project
       mainTasks.forEach(t => mainSpecIds.add(t.specId));
-      console.warn('[ProjectStore] Loaded', mainTasks.length, 'tasks from main project');
+      console.debug('[ProjectStore] Loaded', mainTasks.length, 'tasks from main project');
     }
 
     // 2. Scan worktree specs directories
@@ -462,10 +561,7 @@ export class ProjectStore {
     }
 
     const tasks = Array.from(taskMap.values());
-    console.warn('[ProjectStore] Returning', tasks.length, 'unique tasks (after deduplication)');
-
-    // Update cache
-    this.tasksCache.set(projectId, { tasks, timestamp: now });
+    console.debug('[ProjectStore] Returning', tasks.length, 'unique tasks (after deduplication)');
 
     return tasks;
   }
