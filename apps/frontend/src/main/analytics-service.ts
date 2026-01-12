@@ -38,8 +38,12 @@ import type {
   DatabaseMetricsRow,
   AnalyticsPeriod,
   TaskMetricsData,
+  AnalyticsExportOptions,
+  AnalyticsExportResult,
 } from '../shared/types';
 import { getDatabaseConnection } from './database';
+import Papa from 'papaparse';
+import { jsPDF } from 'jspdf';
 
 /**
  * Analytics Service
@@ -846,6 +850,439 @@ export class AnalyticsService {
     } catch (error) {
       console.error('[AnalyticsService] Failed to cleanup old metrics:', error);
       return 0;
+    }
+  }
+
+  /**
+   * Export analytics data to the specified format
+   *
+   * @param options - Export options (format, sections, date range, etc.)
+   * @returns AnalyticsExportResult with success status and data/error
+   */
+  exportData(options: AnalyticsExportOptions): AnalyticsExportResult {
+    if (!this.ENABLE_ANALYTICS) {
+      return { success: false, error: 'Analytics feature is disabled' };
+    }
+
+    try {
+      const queryOptions: AnalyticsQueryOptions = {
+        projectId: options.projectId,
+        startDate: options.startDate,
+        endDate: options.endDate,
+      };
+
+      switch (options.format) {
+        case 'csv':
+          return this.exportToCSV(queryOptions, options);
+        case 'pdf':
+          return this.exportToPDF(queryOptions, options);
+        case 'json':
+          return this.exportToJSON(queryOptions, options);
+        default:
+          return { success: false, error: `Unsupported export format: ${options.format}` };
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown export error';
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Export analytics data to CSV format using papaparse
+   *
+   * @param queryOptions - Query options for fetching data
+   * @param exportOptions - Export options (sections, filename, etc.)
+   * @returns AnalyticsExportResult with CSV data
+   */
+  private exportToCSV(
+    queryOptions: AnalyticsQueryOptions,
+    exportOptions: AnalyticsExportOptions
+  ): AnalyticsExportResult {
+    try {
+      const sections = exportOptions.sections || ['overview', 'trends', 'distribution'];
+      const csvSections: string[] = [];
+
+      // Export overview section
+      if (sections.includes('overview')) {
+        const overview = this.getOverview(queryOptions);
+        const overviewData = [
+          { Metric: 'Total Tasks', Value: overview.totalTasks },
+          { Metric: 'Completed Tasks', Value: overview.completedTasks },
+          { Metric: 'In Progress Tasks', Value: overview.inProgressTasks },
+          { Metric: 'Backlog Tasks', Value: overview.backlogTasks },
+          { Metric: 'Blocked Tasks', Value: overview.blockedTasks },
+          { Metric: 'Completion Rate (%)', Value: overview.completionRate },
+          { Metric: 'Velocity Per Day', Value: overview.velocityPerDay },
+          { Metric: 'Velocity Per Week', Value: overview.velocityPerWeek },
+          { Metric: 'Avg Completion Time (Hours)', Value: overview.avgCompletionTimeHours ?? 'N/A' },
+          { Metric: 'Period Start', Value: overview.periodStart },
+          { Metric: 'Period End', Value: overview.periodEnd },
+          { Metric: 'Days In Period', Value: overview.daysInPeriod },
+        ];
+
+        csvSections.push('# Overview Metrics');
+        csvSections.push(Papa.unparse(overviewData));
+      }
+
+      // Export trends section
+      if (sections.includes('trends')) {
+        const trends = this.getTrends(queryOptions);
+        const trendData = trends.completedTasks.map((point, index) => ({
+          Date: point.date,
+          'Completed Tasks': point.value,
+          'Created Tasks': trends.createdTasks[index]?.value ?? 0,
+          'Total Tasks': trends.totalTasks[index]?.value ?? 0,
+          Velocity: trends.velocity[index]?.value ?? 0,
+          'Avg Completion Time (Hours)': trends.avgCompletionTime[index]?.value ?? 0,
+        }));
+
+        if (trendData.length > 0) {
+          csvSections.push('');
+          csvSections.push('# Trend Data');
+          csvSections.push(Papa.unparse(trendData));
+        }
+      }
+
+      // Export distribution section
+      if (sections.includes('distribution')) {
+        const distribution = this.getDistribution(queryOptions);
+        const distributionData = distribution.byStatus.map((item) => ({
+          Status: item.name,
+          Count: item.value,
+          'Percentage (%)': item.percentage,
+        }));
+
+        if (distributionData.length > 0) {
+          csvSections.push('');
+          csvSections.push('# Status Distribution');
+          csvSections.push(Papa.unparse(distributionData));
+        }
+
+        // Export project distribution if available
+        if (distribution.byProject && distribution.byProject.length > 0) {
+          const projectData = distribution.byProject.map((item) => ({
+            Project: item.name,
+            Count: item.value,
+            'Percentage (%)': item.percentage,
+          }));
+
+          csvSections.push('');
+          csvSections.push('# Project Distribution');
+          csvSections.push(Papa.unparse(projectData));
+        }
+      }
+
+      // Export velocity section
+      if (sections.includes('velocity')) {
+        const trends = this.getTrends(queryOptions);
+        const velocityData = trends.velocity.map((point, index) => ({
+          Date: point.date,
+          Completed: point.value,
+          Created: trends.createdTasks[index]?.value ?? 0,
+          'Net Change': point.value - (trends.createdTasks[index]?.value ?? 0),
+        }));
+
+        if (velocityData.length > 0) {
+          csvSections.push('');
+          csvSections.push('# Velocity Data');
+          csvSections.push(Papa.unparse(velocityData));
+        }
+      }
+
+      const csvContent = csvSections.join('\n');
+      const bytesWritten = Buffer.byteLength(csvContent, 'utf8');
+
+      return {
+        success: true,
+        data: csvContent,
+        bytesWritten,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'CSV export failed';
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Export analytics data to PDF format using jspdf
+   *
+   * @param queryOptions - Query options for fetching data
+   * @param exportOptions - Export options (sections, filename, etc.)
+   * @returns AnalyticsExportResult with base64 PDF data
+   */
+  private exportToPDF(
+    queryOptions: AnalyticsQueryOptions,
+    exportOptions: AnalyticsExportOptions
+  ): AnalyticsExportResult {
+    try {
+      const sections = exportOptions.sections || ['overview', 'trends', 'distribution'];
+      const doc = new jsPDF();
+
+      let yPosition = 20;
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const margin = 20;
+      const contentWidth = pageWidth - margin * 2;
+
+      // Helper function to check if we need a new page
+      const checkNewPage = (requiredSpace: number): void => {
+        if (yPosition + requiredSpace > doc.internal.pageSize.getHeight() - margin) {
+          doc.addPage();
+          yPosition = 20;
+        }
+      };
+
+      // Title
+      doc.setFontSize(18);
+      doc.setFont('helvetica', 'bold');
+      doc.text('Analytics Report', margin, yPosition);
+      yPosition += 10;
+
+      // Subtitle with date range
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      const { startDate, endDate } = this.getDateRange(queryOptions);
+      doc.text(`Period: ${startDate} to ${endDate}`, margin, yPosition);
+      yPosition += 5;
+      doc.text(`Generated: ${new Date().toISOString().split('T')[0]}`, margin, yPosition);
+      yPosition += 15;
+
+      // Export overview section
+      if (sections.includes('overview')) {
+        checkNewPage(60);
+
+        doc.setFontSize(14);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Overview Metrics', margin, yPosition);
+        yPosition += 8;
+
+        const overview = this.getOverview(queryOptions);
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+
+        const overviewMetrics = [
+          ['Total Tasks', overview.totalTasks.toString()],
+          ['Completed Tasks', overview.completedTasks.toString()],
+          ['In Progress Tasks', overview.inProgressTasks.toString()],
+          ['Backlog Tasks', overview.backlogTasks.toString()],
+          ['Blocked Tasks', overview.blockedTasks.toString()],
+          ['Completion Rate', `${overview.completionRate}%`],
+          ['Velocity Per Day', overview.velocityPerDay.toFixed(2)],
+          ['Velocity Per Week', overview.velocityPerWeek.toFixed(2)],
+          ['Avg Completion Time', overview.avgCompletionTimeHours !== null ? `${overview.avgCompletionTimeHours.toFixed(1)} hours` : 'N/A'],
+        ];
+
+        // Draw metrics in two columns
+        const colWidth = contentWidth / 2;
+        for (let i = 0; i < overviewMetrics.length; i++) {
+          const [label, value] = overviewMetrics[i];
+          const col = i % 2;
+          const x = margin + col * colWidth;
+
+          if (col === 0 && i > 0) {
+            yPosition += 6;
+          }
+
+          doc.setFont('helvetica', 'normal');
+          doc.text(`${label}:`, x, yPosition);
+          doc.setFont('helvetica', 'bold');
+          doc.text(value, x + 60, yPosition);
+        }
+
+        yPosition += 15;
+      }
+
+      // Export distribution section
+      if (sections.includes('distribution')) {
+        checkNewPage(50);
+
+        doc.setFontSize(14);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Status Distribution', margin, yPosition);
+        yPosition += 8;
+
+        const distribution = this.getDistribution(queryOptions);
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+
+        // Table header
+        doc.setFont('helvetica', 'bold');
+        doc.text('Status', margin, yPosition);
+        doc.text('Count', margin + 60, yPosition);
+        doc.text('Percentage', margin + 100, yPosition);
+        yPosition += 6;
+
+        // Table rows
+        doc.setFont('helvetica', 'normal');
+        for (const item of distribution.byStatus) {
+          checkNewPage(8);
+          doc.text(item.name, margin, yPosition);
+          doc.text(item.value.toString(), margin + 60, yPosition);
+          doc.text(`${item.percentage}%`, margin + 100, yPosition);
+          yPosition += 6;
+        }
+
+        yPosition += 10;
+      }
+
+      // Export trends section (simplified table format)
+      if (sections.includes('trends')) {
+        checkNewPage(40);
+
+        doc.setFontSize(14);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Trend Summary', margin, yPosition);
+        yPosition += 8;
+
+        const trends = this.getTrends(queryOptions);
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+
+        // Calculate summary statistics
+        const totalCompleted = trends.completedTasks.reduce((sum, p) => sum + p.value, 0);
+        const totalCreated = trends.createdTasks.reduce((sum, p) => sum + p.value, 0);
+        const avgVelocity = trends.velocity.length > 0
+          ? trends.velocity.reduce((sum, p) => sum + p.value, 0) / trends.velocity.length
+          : 0;
+
+        const trendSummary = [
+          ['Data Points', trends.completedTasks.length.toString()],
+          ['Total Completed', totalCompleted.toString()],
+          ['Total Created', totalCreated.toString()],
+          ['Net Change', (totalCompleted - totalCreated).toString()],
+          ['Average Velocity', avgVelocity.toFixed(2)],
+        ];
+
+        for (const [label, value] of trendSummary) {
+          doc.setFont('helvetica', 'normal');
+          doc.text(`${label}:`, margin, yPosition);
+          doc.setFont('helvetica', 'bold');
+          doc.text(value, margin + 60, yPosition);
+          yPosition += 6;
+        }
+
+        yPosition += 10;
+      }
+
+      // Export velocity section
+      if (sections.includes('velocity')) {
+        checkNewPage(50);
+
+        doc.setFontSize(14);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Velocity Details', margin, yPosition);
+        yPosition += 8;
+
+        const trends = this.getTrends(queryOptions);
+        doc.setFontSize(9);
+
+        // Table header
+        doc.setFont('helvetica', 'bold');
+        doc.text('Date', margin, yPosition);
+        doc.text('Completed', margin + 35, yPosition);
+        doc.text('Created', margin + 65, yPosition);
+        doc.text('Net', margin + 90, yPosition);
+        yPosition += 5;
+
+        // Draw line under header
+        doc.setDrawColor(200);
+        doc.line(margin, yPosition, margin + 100, yPosition);
+        yPosition += 3;
+
+        // Show last 10 entries to keep PDF compact
+        doc.setFont('helvetica', 'normal');
+        const recentVelocity = trends.velocity.slice(-10);
+        for (let i = 0; i < recentVelocity.length; i++) {
+          checkNewPage(6);
+          const point = recentVelocity[i];
+          const created = trends.createdTasks[trends.velocity.length - 10 + i]?.value ?? 0;
+          const net = point.value - created;
+
+          doc.text(point.date, margin, yPosition);
+          doc.text(point.value.toString(), margin + 35, yPosition);
+          doc.text(created.toString(), margin + 65, yPosition);
+          doc.text(net.toString(), margin + 90, yPosition);
+          yPosition += 5;
+        }
+      }
+
+      // Generate PDF as base64 string
+      const pdfOutput = doc.output('datauristring');
+      const bytesWritten = Math.ceil((pdfOutput.length * 3) / 4); // Approximate byte size from base64
+
+      return {
+        success: true,
+        data: pdfOutput,
+        bytesWritten,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'PDF export failed';
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Export analytics data to JSON format
+   *
+   * @param queryOptions - Query options for fetching data
+   * @param exportOptions - Export options (sections, filename, etc.)
+   * @returns AnalyticsExportResult with JSON data
+   */
+  private exportToJSON(
+    queryOptions: AnalyticsQueryOptions,
+    exportOptions: AnalyticsExportOptions
+  ): AnalyticsExportResult {
+    try {
+      const sections = exportOptions.sections || ['overview', 'trends', 'distribution', 'velocity'];
+      const exportData: Record<string, unknown> = {
+        exportedAt: new Date().toISOString(),
+        period: {
+          start: queryOptions.startDate,
+          end: queryOptions.endDate,
+        },
+      };
+
+      if (sections.includes('overview')) {
+        exportData.overview = this.getOverview(queryOptions);
+      }
+
+      if (sections.includes('trends')) {
+        exportData.trends = this.getTrends(queryOptions);
+      }
+
+      if (sections.includes('distribution')) {
+        exportData.distribution = this.getDistribution(queryOptions);
+      }
+
+      if (sections.includes('velocity')) {
+        // Velocity is derived from trends
+        const trends = this.getTrends(queryOptions);
+        exportData.velocity = {
+          period: trends.period,
+          dataPoints: trends.velocity.map((point, index) => ({
+            date: point.date,
+            completed: point.value,
+            created: trends.createdTasks[index]?.value ?? 0,
+            netChange: point.value - (trends.createdTasks[index]?.value ?? 0),
+          })),
+          totalCompleted: trends.completedTasks.reduce((sum, p) => sum + p.value, 0),
+          totalCreated: trends.createdTasks.reduce((sum, p) => sum + p.value, 0),
+          averageVelocity: trends.velocity.length > 0
+            ? trends.velocity.reduce((sum, p) => sum + p.value, 0) / trends.velocity.length
+            : 0,
+        };
+      }
+
+      const jsonContent = JSON.stringify(exportData, null, 2);
+      const bytesWritten = Buffer.byteLength(jsonContent, 'utf8');
+
+      return {
+        success: true,
+        data: jsonContent,
+        bytesWritten,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'JSON export failed';
+      return { success: false, error: errorMessage };
     }
   }
 }
