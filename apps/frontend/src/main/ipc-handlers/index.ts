@@ -37,6 +37,7 @@ import { registerHistoryHandlers } from './history-handlers';
 import { registerSearchHandlers } from './search-handlers';
 import { registerUndoHandlers } from './undo-handlers';
 import { registerAnalyticsHandlers } from './analytics-handlers';
+import { registerMigrationHandlers } from './migration-handlers';
 import { notificationService } from '../notification-service';
 
 /**
@@ -134,6 +135,9 @@ export function setupIpcHandlers(
   // Analytics handlers (task metrics and reporting)
   registerAnalyticsHandlers();
 
+  // Migration handlers (JSON-to-SQLite migration)
+  registerMigrationHandlers(getMainWindow);
+
   console.warn('[IPC] All handler modules registered successfully');
 }
 
@@ -164,5 +168,6 @@ export {
   registerHistoryHandlers,
   registerSearchHandlers,
   registerUndoHandlers,
-  registerAnalyticsHandlers
+  registerAnalyticsHandlers,
+  registerMigrationHandlers
 };
