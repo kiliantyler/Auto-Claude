@@ -1,19 +1,40 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
+import { copyFileSync } from 'fs';
+
+// Plugin to copy SQL schema file to output directory
+function copySchemaPlugin() {
+  return {
+    name: 'copy-schema',
+    writeBundle() {
+      const src = resolve(__dirname, 'src/main/database-schema.sql');
+      const dest = resolve(__dirname, 'out/main/database-schema.sql');
+      try {
+        copyFileSync(src, dest);
+        console.log('[copy-schema] Copied database-schema.sql to out/main/');
+      } catch (error) {
+        console.error('[copy-schema] Failed to copy database-schema.sql:', error);
+      }
+    }
+  };
+}
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({
-      // Bundle these packages into the main process (they won't be in node_modules in packaged app)
-      exclude: [
-        'uuid',
-        'chokidar',
-        'kuzu',
-        'electron-updater',
-        '@electron-toolkit/utils'
-      ]
-    })],
+    plugins: [
+      externalizeDepsPlugin({
+        // Bundle these packages into the main process (they won't be in node_modules in packaged app)
+        exclude: [
+          'uuid',
+          'chokidar',
+          'kuzu',
+          'electron-updater',
+          '@electron-toolkit/utils'
+        ]
+      }),
+      copySchemaPlugin()
+    ],
     build: {
       rollupOptions: {
         input: {
