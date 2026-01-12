@@ -188,6 +188,8 @@ async function detectAndMigrateProjects(): Promise<void> {
       // Check if already migrated
       if (tracker.hasMigrated(projectPath)) {
         console.log(`[Migration] Project already migrated: ${project.name}`);
+        // Still backup any remaining JSON files that weren't backed up before
+        worker.backupRemainingJsonFiles(projectPath);
         continue;
       }
 

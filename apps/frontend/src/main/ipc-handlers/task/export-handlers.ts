@@ -189,8 +189,8 @@ export function registerTaskExportHandlers(): void {
             // Create task in database
             storage.createTask(task);
 
-            // If dual-write enabled, also create JSON files
-            const ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE !== 'false';
+            // If dual-write enabled, also create JSON files (disabled by default)
+            const ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE === 'true';
             if (ENABLE_DUAL_WRITE) {
               // Create spec directory structure
               const specsDir = path.join(

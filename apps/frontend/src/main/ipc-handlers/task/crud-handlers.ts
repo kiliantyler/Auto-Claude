@@ -16,9 +16,9 @@ import { getTaskStorage } from '../../task-storage';
  * Register task CRUD (Create, Read, Update, Delete) handlers
  */
 export function registerTaskCRUDHandlers(agentManager: AgentManager): void {
-  // Check if dual-write mode is enabled (write to both SQLite + JSON)
-  // When false, only write to SQLite (Phase 4: SQLite-only mode)
-  const ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE !== 'false';
+  // Dual-write mode disabled by default (Phase 4 - SQLite-only mode)
+  // Set ENABLE_DUAL_WRITE=true to enable dual-write for debugging
+  const ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE === 'true';
   console.log(`[CRUD Handlers] Dual-write mode: ${ENABLE_DUAL_WRITE ? 'ENABLED' : 'DISABLED'}`);
 
   /**

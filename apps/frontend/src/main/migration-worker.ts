@@ -30,7 +30,7 @@
  * ```
  */
 
-import { existsSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, mkdirSync, renameSync } from 'fs';
 import path from 'path';
 import type Database from 'better-sqlite3';
 import { getDatabaseConnection } from './database';
@@ -296,6 +296,12 @@ export class MigrationWorker {
       // Mark migration as complete
       tracker.markMigrationComplete(projectPath, migratedFiles);
 
+      // Backup migrated JSON files
+      console.log(`[MigrationWorker] Backing up migrated JSON files for: ${projectPath}`);
+      for (const { specId, files } of specsWithFiles) {
+        this.backupJsonFiles(projectPath, specId, files);
+      }
+
       // Emit completion
       this.emitProgress(onProgress, {
         projectPath,
@@ -428,6 +434,69 @@ export class MigrationWorker {
    */
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Backup JSON files by moving them to a .migrated-backup directory
+   *
+   * @param projectPath - Path to the project
+   * @param specId - The spec directory name
+   * @param files - List of JSON files to backup
+   */
+  private backupJsonFiles(projectPath: string, specId: string, files: string[]): void {
+    const specsDir = path.join(projectPath, '.auto-claude', 'specs', specId);
+    const backupDir = path.join(specsDir, '.migrated-backup');
+
+    try {
+      // Create backup directory if it doesn't exist
+      if (!existsSync(backupDir)) {
+        mkdirSync(backupDir, { recursive: true });
+      }
+
+      // Move each JSON file to backup
+      for (const file of files) {
+        const sourcePath = path.join(specsDir, file);
+        const destPath = path.join(backupDir, file);
+
+        if (existsSync(sourcePath)) {
+          renameSync(sourcePath, destPath);
+          console.log(`[MigrationWorker] Backed up: ${specId}/${file}`);
+        }
+      }
+    } catch (error) {
+      console.error(`[MigrationWorker] Failed to backup files for ${specId}:`, error);
+      // Don't throw - backup failure shouldn't stop the migration
+    }
+  }
+
+  /**
+   * Backup any remaining JSON files for already-migrated projects
+   * Called on startup to clean up files from previous migrations
+   *
+   * @param projectPath - Path to the project
+   */
+  public backupRemainingJsonFiles(projectPath: string): void {
+    const specsDir = path.join(projectPath, '.auto-claude', 'specs');
+    if (!existsSync(specsDir)) return;
+
+    try {
+      const specDirs = readdirSync(specsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name !== '.migrated-backup')
+        .map((d) => d.name);
+
+      for (const specId of specDirs) {
+        const specPath = path.join(specsDir, specId);
+        const foundFiles = this.SPEC_JSON_FILES.filter((file) =>
+          existsSync(path.join(specPath, file))
+        );
+
+        if (foundFiles.length > 0) {
+          this.backupJsonFiles(projectPath, specId, foundFiles);
+        }
+      }
+    } catch (error) {
+      console.error(`[MigrationWorker] Error backing up remaining JSON files:`, error);
+    }
   }
 
   /**

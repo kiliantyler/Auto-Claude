@@ -43,9 +43,9 @@ export class TaskStorage {
   private readonly ENABLE_DUAL_WRITE: boolean;
 
   constructor() {
-    // Enable dual-write by default (Phase 1 migration strategy)
-    // Set ENABLE_DUAL_WRITE=false to use SQLite-only mode
-    this.ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE !== 'false';
+    // Disable dual-write by default (Phase 4 - SQLite-only mode)
+    // Set ENABLE_DUAL_WRITE=true to enable dual-write for debugging
+    this.ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE === 'true';
     console.log(`[TaskStorage] Dual-write mode: ${this.ENABLE_DUAL_WRITE ? 'ENABLED' : 'DISABLED'}`);
   }
 
