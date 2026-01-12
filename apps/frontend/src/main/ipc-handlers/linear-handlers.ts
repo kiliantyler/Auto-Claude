@@ -6,6 +6,7 @@ import path from 'path';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from 'fs';
 import { projectStore } from '../project-store';
 import { parseEnvFile } from './utils';
+import { getTaskStorage } from '../task-storage';
 
 
 import { AgentManager } from '../agent';
@@ -483,28 +484,9 @@ ${issue.description || 'No description provided.'}
               .substring(0, 50);
             const specId = `${String(specNumber).padStart(3, '0')}-${slugifiedTitle}`;
 
-            // Create spec directory
+            // Create spec directory (needed for Python backend)
             const specDir = path.join(specsDir, specId);
             mkdirSync(specDir, { recursive: true });
-
-            // Create initial implementation_plan.json
-            const now = new Date().toISOString();
-            const implementationPlan = {
-              feature: issue.title,
-              description: description,
-              created_at: now,
-              updated_at: now,
-              status: 'pending',
-              phases: []
-            };
-            writeFileSync(path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN), JSON.stringify(implementationPlan, null, 2));
-
-            // Create requirements.json
-            const requirements = {
-              task_description: description,
-              workflow_type: 'feature'
-            };
-            writeFileSync(path.join(specDir, AUTO_BUILD_PATHS.REQUIREMENTS), JSON.stringify(requirements, null, 2));
 
             // Build metadata
             const metadata: TaskMetadata = {
@@ -514,7 +496,33 @@ ${issue.description || 'No description provided.'}
               linearUrl: issue.url,
               category: 'feature'
             };
-            writeFileSync(path.join(specDir, 'task_metadata.json'), JSON.stringify(metadata, null, 2));
+
+            // Create task in SQLite database (primary storage)
+            const task = {
+              id: specId,
+              specId: specId,
+              projectId: project.id,
+              title: issue.title,
+              description: description,
+              status: 'backlog' as const,
+              subtasks: [],
+              logs: [],
+              metadata,
+              createdAt: new Date(),
+              updatedAt: new Date()
+            };
+
+            try {
+              const taskStorage = getTaskStorage();
+              taskStorage.createTask(task);
+              console.warn(`[LINEAR_IMPORT] Created task in SQLite: ${specId}`);
+            } catch (dbErr) {
+              console.error('[LINEAR_IMPORT] Failed to write to SQLite:', dbErr);
+              throw dbErr; // Fail the import if database write fails
+            }
+
+            // Invalidate cache
+            projectStore.invalidateTasksCache(project.id);
 
             // Start spec creation with the existing spec directory
             agentManager.startSpecCreation(specId, project.path, description, specDir, metadata);

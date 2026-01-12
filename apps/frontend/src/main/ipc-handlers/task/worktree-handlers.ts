@@ -17,6 +17,7 @@ import {
   getTaskWorktreeDir,
   findTaskWorktree,
 } from '../../worktree-paths';
+import { getTaskStorage } from '../../task-storage';
 
 /**
  * Read utility feature settings (for commit message, merge resolver) from settings file
@@ -1924,88 +1925,27 @@ export function registerWorktreeHandlers(
                 }
               }
 
-              // Persist the status change to implementation_plan.json
-              // Issue #243: We must update BOTH the main project's plan AND the worktree's plan (if it exists)
-              // because ProjectStore prefers the worktree version when deduplicating tasks.
-              // OPTIMIZATION: Use async I/O and parallel updates to prevent UI blocking
-              // NOTE: The worktree has the same directory structure as main project
-              const planPaths: { path: string; isMain: boolean }[] = [
-                { path: path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN), isMain: true },
-              ];
-              // Add worktree plan path if worktree exists
-              if (worktreePath) {
-                const worktreeSpecDir = path.join(worktreePath, project.autoBuildPath || '.auto-claude', 'specs', task.specId);
-                planPaths.push({ path: path.join(worktreeSpecDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN), isMain: false });
-              }
-
-              const { promises: fsPromises } = require('fs');
-
-              // Fire and forget - don't block the response on file writes
-              // But add retry logic for transient failures and verification
-              // Uses EAFP pattern (try/catch) instead of LBYL (existsSync check) to avoid TOCTOU race conditions
-              const updatePlanWithRetry = async (planPath: string, isMain: boolean, maxRetries = 3) => {
-                for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                  try {
-                    const planContent = await fsPromises.readFile(planPath, 'utf-8');
-                    const plan = JSON.parse(planContent);
-                    plan.status = newStatus;
-                    plan.planStatus = planStatus;
-                    plan.updated_at = new Date().toISOString();
-                    if (staged) {
-                      plan.stagedAt = new Date().toISOString();
-                      plan.stagedInMainProject = true;
-                    }
-                    await fsPromises.writeFile(planPath, JSON.stringify(plan, null, 2));
-
-                    // Verify the write succeeded by reading back
-                    const verifyContent = await fsPromises.readFile(planPath, 'utf-8');
-                    const verifyPlan = JSON.parse(verifyContent);
-                    if (verifyPlan.status === newStatus && verifyPlan.planStatus === planStatus) {
-                      return true; // Write verified
-                    }
-                    throw new Error('Write verification failed - status mismatch');
-                  } catch (persistError: unknown) {
-                    // File doesn't exist - nothing to update (not an error)
-                    if (persistError && typeof persistError === 'object' && 'code' in persistError && persistError.code === 'ENOENT') {
-                      return true;
-                    }
-                    const isLastAttempt = attempt === maxRetries;
-                    if (isLastAttempt) {
-                      // Only log error if main plan fails; worktree plan might legitimately be missing or read-only
-                      if (isMain) {
-                        console.error('Failed to persist task status to main plan after retries:', persistError);
-                      } else {
-                        debug('Failed to persist task status to worktree plan (non-critical):', persistError);
-                      }
-                      return false;
-                    }
-                    // Wait before retry (exponential backoff: 100ms, 200ms, 400ms)
-                    await new Promise(r => setTimeout(r, 100 * Math.pow(2, attempt - 1)));
-                  }
-                }
-                return false;
-              };
-
-              const updatePlans = async () => {
-                const results = await Promise.all(
-                  planPaths.map(({ path: planPath, isMain }) =>
-                    updatePlanWithRetry(planPath, isMain)
-                  )
-                );
-                // Log if main plan update failed (first element)
-                if (!results[0]) {
-                  console.warn('Background plan update: main plan write may not have persisted');
-                }
-              };
-
-              // IMPORTANT: Wait for plan updates to complete before responding (fixes #243)
-              // Previously this was "fire and forget" which caused a race condition:
-              // resolve() would return before files were written, and UI refresh would read old status
+              // Persist the status change to SQLite database (single source of truth)
+              // NOTE: JSON files are no longer written - SQLite is now the only persistence layer
               try {
-                await updatePlans();
-              } catch (err) {
-                debug('Plan update failed:', err);
-                // Non-fatal: UI will still update, but status may not persist across refresh
+                const storage = getTaskStorage();
+                const updates: {
+                  status: 'human_review' | 'done';
+                  stagedInMainProject?: boolean;
+                  stagedAt?: string;
+                } = {
+                  status: newStatus as 'human_review' | 'done'
+                };
+                if (staged) {
+                  updates.stagedAt = new Date().toISOString();
+                  updates.stagedInMainProject = true;
+                }
+                storage.updateTask(task.id, updates);
+                projectStore.invalidateTasksCache(project.id);
+                debug('Task status persisted to SQLite:', task.id, '-> status:', newStatus);
+              } catch (dbErr) {
+                console.error('Failed to persist task status to SQLite:', dbErr);
+                // Non-fatal: UI will still update via IPC event
               }
 
               const mainWindow = getMainWindow();

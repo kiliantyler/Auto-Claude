@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 
 import { projectStore } from '../project-store';
 import { AgentManager } from '../agent';
 import { debugLog, debugError } from '../../shared/utils/debug-logger';
+import { getTaskStorage } from '../task-storage';
 
 /**
  * Read feature settings from the settings file
@@ -530,31 +531,9 @@ ${(feature.acceptance_criteria || []).map((c: string) => `- [ ] ${c}`).join('\n'
           .substring(0, 50);
         const specId = `${String(specNumber).padStart(3, '0')}-${slugifiedTitle}`;
 
-        // Create spec directory
+        // Create spec directory (needed for Python backend)
         const specDir = path.join(specsDir, specId);
         mkdirSync(specDir, { recursive: true });
-
-        // Create initial implementation_plan.json
-        const now = new Date().toISOString();
-        const implementationPlan = {
-          feature: feature.title,
-          description: taskDescription,
-          created_at: now,
-          updated_at: now,
-          status: 'pending',
-          phases: []
-        };
-        writeFileSync(path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN), JSON.stringify(implementationPlan, null, 2));
-
-        // Create requirements.json
-        const requirements = {
-          task_description: taskDescription,
-          workflow_type: 'feature'
-        };
-        writeFileSync(path.join(specDir, AUTO_BUILD_PATHS.REQUIREMENTS), JSON.stringify(requirements, null, 2));
-
-        // Create spec.md (required by backend spec creation process)
-        writeFileSync(path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE), taskDescription);
 
         // Build metadata
         const metadata: TaskMetadata = {
@@ -562,17 +541,6 @@ ${(feature.acceptance_criteria || []).map((c: string) => `- [ ] ${c}`).join('\n'
           featureId: feature.id,
           category: 'feature'
         };
-        writeFileSync(path.join(specDir, 'task_metadata.json'), JSON.stringify(metadata, null, 2));
-
-        // NOTE: We do NOT auto-start spec creation here - user should explicitly start the task
-        // from the kanban board when they're ready
-
-        // Update feature with linked spec
-        feature.status = 'planned';
-        feature.linked_spec_id = specId;
-        roadmap.metadata = roadmap.metadata || {};
-        roadmap.metadata.updated_at = new Date().toISOString();
-        writeFileSync(roadmapPath, JSON.stringify(roadmap, null, 2));
 
         // Create task object
         const task: Task = {
@@ -588,6 +556,26 @@ ${(feature.acceptance_criteria || []).map((c: string) => `- [ ] ${c}`).join('\n'
           createdAt: new Date(),
           updatedAt: new Date()
         };
+
+        // Write to SQLite database (primary storage)
+        try {
+          const taskStorage = getTaskStorage();
+          taskStorage.createTask(task);
+          console.warn(`[ROADMAP_CONVERT] Created task in SQLite: ${specId}`);
+        } catch (dbErr) {
+          console.error('[ROADMAP_CONVERT] Failed to write to SQLite:', dbErr);
+          throw dbErr;
+        }
+
+        // Invalidate cache
+        projectStore.invalidateTasksCache(projectId);
+
+        // Update feature with linked spec (this writes to roadmap.json - needed for roadmap UI)
+        feature.status = 'planned';
+        feature.linked_spec_id = specId;
+        roadmap.metadata = roadmap.metadata || {};
+        roadmap.metadata.updated_at = new Date().toISOString();
+        writeFileSync(roadmapPath, JSON.stringify(roadmap, null, 2));
 
         return { success: true, data: task };
       } catch (error) {

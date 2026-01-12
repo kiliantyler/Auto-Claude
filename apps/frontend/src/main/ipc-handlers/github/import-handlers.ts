@@ -9,6 +9,7 @@ import { projectStore } from '../../project-store';
 import { AgentManager } from '../../agent';
 import { getGitHubConfig, githubFetch } from './utils';
 import { createSpecForIssue } from './spec-utils';
+import { getTaskStorage } from '../../task-storage';
 
 /**
  * Import multiple GitHub issues as tasks
@@ -69,6 +70,34 @@ ${issue.body || 'No description provided.'}
             labelNames,
             project.settings?.mainBranch  // Pass project's configured main branch
           );
+
+          // Write to SQLite database (primary storage for frontend)
+          const task: Task = {
+            id: specData.specId,
+            specId: specData.specId,
+            projectId: project.id,
+            title: issue.title,
+            description: specData.taskDescription,
+            status: 'backlog',
+            subtasks: [],
+            logs: [],
+            metadata: specData.metadata,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          };
+
+          try {
+            const taskStorage = getTaskStorage();
+            taskStorage.createTask(task);
+            console.warn(`[GITHUB_IMPORT] Created task in SQLite: ${specData.specId}`);
+            tasks.push(task);
+          } catch (dbErr) {
+            console.error('[GITHUB_IMPORT] Failed to write to SQLite:', dbErr);
+            throw dbErr;
+          }
+
+          // Invalidate cache
+          projectStore.invalidateTasksCache(project.id);
 
           // Start spec creation with the existing spec directory
           agentManager.startSpecCreation(

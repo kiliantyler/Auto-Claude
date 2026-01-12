@@ -1,69 +1,22 @@
 /**
- * Plan File Utilities
+ * Plan/Task Status Utilities
  *
- * Provides thread-safe operations for reading and writing implementation_plan.json files.
- * Uses an in-memory lock to serialize updates and prevent race conditions when multiple
- * IPC handlers try to update the same plan file concurrently.
+ * Provides operations for updating task status and plan data in SQLite database.
  *
- * IMPORTANT LIMITATION:
- * The synchronous function `persistPlanStatusSync` does NOT participate in the locking
- * mechanism. It bypasses the async lock entirely, which means:
- * - It can race with concurrent async operations (persistPlanStatus, updatePlanFile, etc.)
- * - It should ONLY be used when you are certain no async operations are pending on the same file
- * - Prefer using the async `persistPlanStatus` whenever possible
- *
- * If you need synchronous behavior, ensure that:
- * 1. No async plan operations are in flight for the same file path
- * 2. The calling context truly cannot use async/await (e.g., synchronous event handlers)
+ * NOTE: This module was refactored from JSON file operations to SQLite-only operations.
+ * All task data is now stored in the SQLite database, not in JSON files.
+ * JSON files are only read during migration to populate the database.
  */
 
 import path from 'path';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { AUTO_BUILD_PATHS, getSpecsDir } from '../../../shared/constants';
-import type { TaskStatus, Project, Task } from '../../../shared/types';
+import type { TaskStatus, Project, Task, Subtask, ExecutionProgress } from '../../../shared/types';
+import { getTaskStorage } from '../../task-storage';
 import { projectStore } from '../../project-store';
 
-// In-memory locks for plan file operations
-// Key: plan file path, Value: Promise chain for serializing operations
-const planLocks = new Map<string, Promise<void>>();
-
 /**
- * Serialize operations on a specific plan file to prevent race conditions.
- * Each operation waits for the previous one to complete before starting.
- */
-async function withPlanLock<T>(planPath: string, operation: () => Promise<T>): Promise<T> {
-  // Get or create the lock chain for this file
-  const currentLock = planLocks.get(planPath) || Promise.resolve();
-
-  // Create a new promise that will resolve after our operation completes
-  let resolve: () => void;
-  const newLock = new Promise<void>((r) => { resolve = r; });
-  planLocks.set(planPath, newLock);
-
-  try {
-    // Wait for any previous operation to complete
-    await currentLock;
-    // Execute our operation
-    return await operation();
-  } finally {
-    // Release the lock
-    resolve!();
-    // Clean up if this was the last operation
-    if (planLocks.get(planPath) === newLock) {
-      planLocks.delete(planPath);
-    }
-  }
-}
-
-/**
- * Check if an error is a "file not found" error
- */
-function isFileNotFoundError(err: unknown): boolean {
-  return (err as NodeJS.ErrnoException).code === 'ENOENT';
-}
-
-/**
- * Get the plan file path for a task
+ * Get the plan file path for a task (kept for backward compatibility with migration code)
+ * @deprecated Use SQLite database instead of plan files
  */
 export function getPlanPath(project: Project, task: Task): string {
   const specsBaseDir = getSpecsDir(project.autoBuildPath);
@@ -73,6 +26,7 @@ export function getPlanPath(project: Project, task: Task): string {
 
 /**
  * Map UI TaskStatus to Python-compatible planStatus
+ * @deprecated Python backend should read from SQLite directly
  */
 export function mapStatusToPlanStatus(status: TaskStatus): string {
   switch (status) {
@@ -89,176 +43,156 @@ export function mapStatusToPlanStatus(status: TaskStatus): string {
 }
 
 /**
- * Persist task status to implementation_plan.json file.
- * This is thread-safe and prevents race conditions when multiple handlers update the same file.
+ * Persist task status to SQLite database.
  *
- * @param planPath - Path to the implementation_plan.json file
+ * @param _planPath - Ignored (kept for API compatibility during migration)
  * @param status - The TaskStatus to persist
- * @param projectId - Optional project ID to invalidate cache (recommended for performance)
- * @returns true if status was persisted, false if plan file doesn't exist
+ * @param projectId - Optional project ID to invalidate cache
+ * @param taskId - Task ID to update (required for SQLite)
+ * @returns true if status was persisted, false otherwise
  */
-export async function persistPlanStatus(planPath: string, status: TaskStatus, projectId?: string): Promise<boolean> {
-  return withPlanLock(planPath, async () => {
-    try {
-      // Read file directly without existence check to avoid TOCTOU race condition
-      const planContent = readFileSync(planPath, 'utf-8');
-      const plan = JSON.parse(planContent);
+export async function persistPlanStatus(
+  _planPath: string,
+  status: TaskStatus,
+  projectId?: string,
+  taskId?: string
+): Promise<boolean> {
+  if (!taskId) {
+    console.warn('[plan-file-utils] persistPlanStatus called without taskId - cannot update SQLite');
+    return false;
+  }
 
-      plan.status = status;
-      plan.planStatus = mapStatusToPlanStatus(status);
-      plan.updated_at = new Date().toISOString();
+  try {
+    const storage = getTaskStorage();
+    const result = storage.updateTask(taskId, { status });
 
-      writeFileSync(planPath, JSON.stringify(plan, null, 2));
-
+    if (result) {
       // Invalidate tasks cache since status changed
       if (projectId) {
         projectStore.invalidateTasksCache(projectId);
       }
-
       return true;
-    } catch (err) {
-      // File not found is expected - return false
-      if (isFileNotFoundError(err)) {
-        return false;
-      }
-      console.warn(`[plan-file-utils] Could not persist status to ${planPath}:`, err);
-      return false;
     }
-  });
-}
-
-/**
- * Persist task status synchronously (for use in event handlers where async isn't practical).
- *
- * WARNING: This function bypasses the async locking mechanism entirely!
- *
- * This means it can race with concurrent async operations (persistPlanStatus, updatePlanFile,
- * createPlanIfNotExists) that may be in flight for the same file. Using this function while
- * async operations are pending can result in:
- * - Lost updates (this write may overwrite changes from an async operation, or vice versa)
- * - Corrupted JSON (if writes interleave at the filesystem level)
- * - Inconsistent state between what was written and what the async operation expected to read
- *
- * ONLY use this function when ALL of the following conditions are met:
- * 1. You are in a synchronous context that cannot use async/await (e.g., certain event handlers)
- * 2. You are certain no async plan operations are pending or in-flight for this file path
- * 3. No other code will initiate async plan operations until this function returns
- *
- * When possible, prefer using the async `persistPlanStatus` function instead, which properly
- * participates in the locking mechanism and prevents race conditions.
- *
- * @param planPath - Path to the implementation_plan.json file
- * @param status - The TaskStatus to persist
- * @param projectId - Optional project ID to invalidate cache (recommended for performance)
- * @returns true if status was persisted, false otherwise
- */
-export function persistPlanStatusSync(planPath: string, status: TaskStatus, projectId?: string): boolean {
-  try {
-    // Read file directly without existence check to avoid TOCTOU race condition
-    const planContent = readFileSync(planPath, 'utf-8');
-    const plan = JSON.parse(planContent);
-
-    plan.status = status;
-    plan.planStatus = mapStatusToPlanStatus(status);
-    plan.updated_at = new Date().toISOString();
-
-    writeFileSync(planPath, JSON.stringify(plan, null, 2));
-
-    // Invalidate tasks cache since status changed
-    if (projectId) {
-      projectStore.invalidateTasksCache(projectId);
-    }
-
-    return true;
+    return false;
   } catch (err) {
-    // File not found is expected - return false
-    if (isFileNotFoundError(err)) {
-      return false;
-    }
-    console.warn(`[plan-file-utils] Could not persist status to ${planPath}:`, err);
+    console.warn(`[plan-file-utils] Could not persist status for task ${taskId}:`, err);
     return false;
   }
 }
 
 /**
- * Read and update the plan file atomically.
+ * Persist task status synchronously to SQLite database.
  *
- * @param planPath - Path to the implementation_plan.json file
- * @param updater - Function that receives the current plan and returns the updated plan
- * @returns The updated plan, or null if the file doesn't exist
+ * @param _planPath - Ignored (kept for API compatibility during migration)
+ * @param status - The TaskStatus to persist
+ * @param projectId - Optional project ID to invalidate cache
+ * @param taskId - Task ID to update (required for SQLite)
+ * @returns true if status was persisted, false otherwise
  */
-export async function updatePlanFile<T extends Record<string, unknown>>(
-  planPath: string,
-  updater: (plan: T) => T
-): Promise<T | null> {
-  return withPlanLock(planPath, async () => {
-    try {
-      // Read file directly without existence check to avoid TOCTOU race condition
-      const planContent = readFileSync(planPath, 'utf-8');
-      const plan = JSON.parse(planContent) as T;
+export function persistPlanStatusSync(
+  _planPath: string,
+  status: TaskStatus,
+  projectId?: string,
+  taskId?: string
+): boolean {
+  if (!taskId) {
+    console.warn('[plan-file-utils] persistPlanStatusSync called without taskId - cannot update SQLite');
+    return false;
+  }
 
-      const updatedPlan = updater(plan);
-      // Add updated_at timestamp - use type assertion since T extends Record<string, unknown>
-      (updatedPlan as Record<string, unknown>).updated_at = new Date().toISOString();
+  try {
+    const storage = getTaskStorage();
+    const result = storage.updateTask(taskId, { status });
 
-      writeFileSync(planPath, JSON.stringify(updatedPlan, null, 2));
-      return updatedPlan;
-    } catch (err) {
-      // File not found is expected - return null
-      if (isFileNotFoundError(err)) {
-        return null;
+    if (result) {
+      // Invalidate tasks cache since status changed
+      if (projectId) {
+        projectStore.invalidateTasksCache(projectId);
       }
-      console.warn(`[plan-file-utils] Could not update plan at ${planPath}:`, err);
-      return null;
+      return true;
     }
-  });
+    return false;
+  } catch (err) {
+    console.warn(`[plan-file-utils] Could not persist status for task ${taskId}:`, err);
+    return false;
+  }
 }
 
 /**
- * Create a new plan file if it doesn't exist.
+ * Update task data in SQLite database.
  *
- * @param planPath - Path to the implementation_plan.json file
- * @param task - The task to create the plan for
- * @param status - Initial status for the plan
+ * @param taskId - Task ID to update
+ * @param updates - Partial task updates
+ * @returns The updated task, or null if not found
+ */
+export function updateTaskInDatabase(
+  taskId: string,
+  updates: Partial<{
+    status: TaskStatus;
+    subtasks: Subtask[];
+    executionProgress: ExecutionProgress;
+    title: string;
+    description: string;
+  }>
+): Task | null {
+  try {
+    const storage = getTaskStorage();
+    return storage.updateTask(taskId, updates);
+  } catch (err) {
+    console.warn(`[plan-file-utils] Could not update task ${taskId}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Create a new task in SQLite database if it doesn't exist.
+ * This replaces the old createPlanIfNotExists function.
+ *
+ * @param task - The task to create
+ * @param status - Initial status for the task
+ */
+export function createTaskIfNotExists(task: Task, status: TaskStatus): void {
+  try {
+    const storage = getTaskStorage();
+
+    // Check if task already exists
+    const existing = storage.getTask(task.id);
+    if (existing) {
+      return; // Task exists, nothing to do
+    }
+
+    // Create the task with initial status
+    storage.createTask({
+      ...task,
+      status
+    });
+  } catch (err) {
+    console.warn(`[plan-file-utils] Could not create task ${task.id}:`, err);
+  }
+}
+
+// Legacy exports for backward compatibility during migration
+// These are deprecated and will be removed once all callers are updated
+
+/**
+ * @deprecated Use updateTaskInDatabase instead
+ */
+export async function updatePlanFile<T extends Record<string, unknown>>(
+  _planPath: string,
+  _updater: (plan: T) => T
+): Promise<T | null> {
+  console.warn('[plan-file-utils] updatePlanFile is deprecated - use updateTaskInDatabase instead');
+  return null;
+}
+
+/**
+ * @deprecated Use createTaskIfNotExists instead
  */
 export async function createPlanIfNotExists(
-  planPath: string,
+  _planPath: string,
   task: Task,
   status: TaskStatus
 ): Promise<void> {
-  return withPlanLock(planPath, async () => {
-    // Try to read the file first - if it exists, do nothing
-    try {
-      readFileSync(planPath, 'utf-8');
-      return; // File exists, nothing to do
-    } catch (err) {
-      if (!isFileNotFoundError(err)) {
-        throw err; // Re-throw unexpected errors
-      }
-      // File doesn't exist, continue to create it
-    }
-
-    const plan = {
-      feature: task.title,
-      description: task.description || '',
-      created_at: task.createdAt.toISOString(),
-      updated_at: new Date().toISOString(),
-      status: status,
-      planStatus: mapStatusToPlanStatus(status),
-      phases: []
-    };
-
-    // Ensure directory exists - use try/catch pattern
-    const planDir = path.dirname(planPath);
-    try {
-      mkdirSync(planDir, { recursive: true });
-    } catch (err) {
-      // Directory might already exist or be created concurrently - that's fine
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw err;
-      }
-    }
-
-    writeFileSync(planPath, JSON.stringify(plan, null, 2));
-  });
+  console.warn('[plan-file-utils] createPlanIfNotExists is deprecated - use createTaskIfNotExists instead');
+  createTaskIfNotExists(task, status);
 }

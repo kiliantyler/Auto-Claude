@@ -505,7 +505,9 @@ export class ProjectStore {
   /**
    * Get tasks for a project from SQLite database
    * Implements caching with 3-second TTL to prevent excessive database queries
-   * Falls back to directory scanning if database is empty (during migration)
+   *
+   * NOTE: Tasks are now stored exclusively in SQLite.
+   * JSON files are only read during migration to populate the database.
    */
   getTasks(projectId: string): Task[] {
     // Check cache first
@@ -532,22 +534,9 @@ export class ProjectStore {
       });
     });
 
-    let tasks: Task[] = [];
-
-    // SQLite-only mode (ENABLE_DUAL_WRITE=false): Read from SQLite database
-    // Dual-write mode (ENABLE_DUAL_WRITE=true): Read from SQLite with JSON fallback
-    const dbTasks = this.readTasksFromDatabase(projectId);
-    if (dbTasks.length > 0) {
-      tasks = dbTasks;
-      console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from SQLite database');
-    } else if (this.ENABLE_DUAL_WRITE) {
-      // Fallback to directory scanning only if dual-write is enabled and database is empty
-      console.warn('[ProjectStore] Database is empty, falling back to directory scanning');
-      tasks = this.scanTasksFromDirectory(project, projectId);
-    } else {
-      // SQLite-only mode with empty database - no fallback
-      console.debug('[ProjectStore] No tasks found in SQLite database');
-    }
+    // Read tasks from SQLite database (single source of truth)
+    const tasks = this.readTasksFromDatabase(projectId);
+    console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from SQLite database');
 
     // Update cache
     this.tasksCache.set(projectId, { tasks, timestamp: now });
@@ -556,10 +545,13 @@ export class ProjectStore {
   }
 
   /**
-   * Scan tasks from directory (legacy method, kept for fallback during migration)
-   * This method scans the specs directory and worktrees to load tasks from JSON files
+   * Scan tasks from directory (MIGRATION ONLY)
+   * This method scans the specs directory and worktrees to load tasks from JSON files.
+   *
+   * @deprecated This method is only used during migration to populate SQLite database.
+   * It should NOT be called during normal runtime. Use readTasksFromDatabase() instead.
    */
-  private scanTasksFromDirectory(project: Project, projectId: string): Task[] {
+  scanTasksFromDirectory(project: Project, projectId: string): Task[] {
     const allTasks: Task[] = [];
     const specsBaseDir = getSpecsDir(project.autoBuildPath);
 
@@ -640,9 +632,13 @@ export class ProjectStore {
   }
 
   /**
-   * Load tasks from a specs directory (helper method for main project and worktrees)
+   * Load tasks from a specs directory (MIGRATION ONLY)
+   * Helper method used by scanTasksFromDirectory during migration.
+   *
+   * @deprecated This method is only used during migration to populate SQLite database.
+   * It should NOT be called during normal runtime.
    */
-  private loadTasksFromSpecsDir(
+  loadTasksFromSpecsDir(
     specsDir: string,
     basePath: string,
     location: 'main' | 'worktree',
@@ -1014,7 +1010,7 @@ export class ProjectStore {
   }
 
   /**
-   * Archive tasks by writing archivedAt to their metadata
+   * Archive tasks by updating metadata in SQLite database
    * @param projectId - Project ID
    * @param taskIds - IDs of tasks to archive
    * @param version - Version they were archived in (optional)
@@ -1026,50 +1022,43 @@ export class ProjectStore {
       return false;
     }
 
-    const specsBaseDir = getSpecsDir(project.autoBuildPath);
     const archivedAt = new Date().toISOString();
     let hasErrors = false;
 
-    for (const taskId of taskIds) {
-      // Find ALL locations where this task exists (main + worktrees)
-      const specPaths = this.findAllSpecPaths(project.path, specsBaseDir, taskId);
+    try {
+      const db = getDatabaseConnection().getConnection();
 
-      // If spec directory doesn't exist anywhere, skip gracefully
-      if (specPaths.length === 0) {
-        console.log(`[ProjectStore] archiveTasks: Spec directory not found for ${taskId}, skipping (already removed)`);
-        continue;
-      }
-
-      // Archive in ALL locations
-      for (const specPath of specPaths) {
+      for (const taskId of taskIds) {
         try {
-          const metadataPath = path.join(specPath, 'task_metadata.json');
-          let metadata: TaskMetadata = {};
+          // Get current task to update metadata
+          const stmt = db.prepare('SELECT metadata_json FROM tasks WHERE id = ? OR spec_id = ?');
+          const row = stmt.get(taskId, taskId) as { metadata_json: string } | undefined;
 
-          // Read existing metadata, handling missing file without TOCTOU race
-          try {
-            metadata = JSON.parse(readFileSync(metadataPath, 'utf-8'));
-          } catch (readErr: unknown) {
-            // File doesn't exist yet - start with empty metadata
-            if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-              throw readErr;
-            }
+          if (!row) {
+            console.log(`[ProjectStore] archiveTasks: Task not found in database for ${taskId}, skipping`);
+            continue;
           }
 
-          // Add archive info
+          // Parse and update metadata
+          const metadata = JSON.parse(row.metadata_json) as TaskMetadata & Record<string, unknown>;
           metadata.archivedAt = archivedAt;
           if (version) {
             metadata.archivedInVersion = version;
           }
 
-          writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
-          console.log(`[ProjectStore] archiveTasks: Successfully archived task ${taskId} at ${specPath}`);
+          // Update in database
+          const updateStmt = db.prepare('UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ? OR spec_id = ?');
+          updateStmt.run(JSON.stringify(metadata), new Date().toISOString(), taskId, taskId);
+
+          console.log(`[ProjectStore] archiveTasks: Successfully archived task ${taskId}`);
         } catch (error) {
-          console.error(`[ProjectStore] archiveTasks: Failed to archive task ${taskId} at ${specPath}:`, error);
+          console.error(`[ProjectStore] archiveTasks: Failed to archive task ${taskId}:`, error);
           hasErrors = true;
-          // Continue with other locations/tasks even if one fails
         }
       }
+    } catch (error) {
+      console.error('[ProjectStore] archiveTasks: Database error:', error);
+      return false;
     }
 
     // Invalidate cache since task metadata changed
@@ -1079,7 +1068,7 @@ export class ProjectStore {
   }
 
   /**
-   * Unarchive tasks by removing archivedAt from their metadata
+   * Unarchive tasks by updating metadata in SQLite database
    * @param projectId - Project ID
    * @param taskIds - IDs of tasks to unarchive
    */
@@ -1090,45 +1079,40 @@ export class ProjectStore {
       return false;
     }
 
-    const specsBaseDir = getSpecsDir(project.autoBuildPath);
     let hasErrors = false;
 
-    for (const taskId of taskIds) {
-      // Find ALL locations where this task exists (main + worktrees)
-      const specPaths = this.findAllSpecPaths(project.path, specsBaseDir, taskId);
+    try {
+      const db = getDatabaseConnection().getConnection();
 
-      if (specPaths.length === 0) {
-        console.warn(`[ProjectStore] unarchiveTasks: Spec directory not found for task ${taskId}`);
-        continue;
-      }
-
-      // Unarchive in ALL locations
-      for (const specPath of specPaths) {
+      for (const taskId of taskIds) {
         try {
-          const metadataPath = path.join(specPath, 'task_metadata.json');
-          let metadata: TaskMetadata;
+          // Get current task to update metadata
+          const stmt = db.prepare('SELECT metadata_json FROM tasks WHERE id = ? OR spec_id = ?');
+          const row = stmt.get(taskId, taskId) as { metadata_json: string } | undefined;
 
-          // Read metadata, handling missing file without TOCTOU race
-          try {
-            metadata = JSON.parse(readFileSync(metadataPath, 'utf-8'));
-          } catch (readErr: unknown) {
-            if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') {
-              console.warn(`[ProjectStore] unarchiveTasks: Metadata file not found for task ${taskId} at ${specPath}`);
-              continue;
-            }
-            throw readErr;
+          if (!row) {
+            console.warn(`[ProjectStore] unarchiveTasks: Task not found in database for ${taskId}`);
+            continue;
           }
 
+          // Parse and update metadata (remove archive fields)
+          const metadata = JSON.parse(row.metadata_json) as TaskMetadata & Record<string, unknown>;
           delete metadata.archivedAt;
           delete metadata.archivedInVersion;
-          writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
-          console.log(`[ProjectStore] unarchiveTasks: Successfully unarchived task ${taskId} at ${specPath}`);
+
+          // Update in database
+          const updateStmt = db.prepare('UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ? OR spec_id = ?');
+          updateStmt.run(JSON.stringify(metadata), new Date().toISOString(), taskId, taskId);
+
+          console.log(`[ProjectStore] unarchiveTasks: Successfully unarchived task ${taskId}`);
         } catch (error) {
-          console.error(`[ProjectStore] unarchiveTasks: Failed to unarchive task ${taskId} at ${specPath}:`, error);
+          console.error(`[ProjectStore] unarchiveTasks: Failed to unarchive task ${taskId}:`, error);
           hasErrors = true;
-          // Continue with other locations/tasks even if one fails
         }
       }
+    } catch (error) {
+      console.error('[ProjectStore] unarchiveTasks: Database error:', error);
+      return false;
     }
 
     // Invalidate cache since task metadata changed

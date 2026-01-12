@@ -6,6 +6,7 @@ import { IPC_CHANNELS, getSpecsDir, AUTO_BUILD_PATHS } from '../../shared/consta
 import type { IPCResult, InsightsSession, InsightsSessionSummary, InsightsModelConfig, Task, TaskMetadata } from '../../shared/types';
 import { projectStore } from '../project-store';
 import { insightsService } from '../insights-service';
+import { getTaskStorage } from '../task-storage';
 
 /**
  * Register all insights-related IPC handlers
@@ -130,7 +131,7 @@ export function registerInsightsHandlers(
           .substring(0, 50);
         const specId = `${String(specNumber).padStart(3, '0')}-${slugifiedTitle}`;
 
-        // Create spec directory
+        // Create spec directory (needed for Python backend)
         const specDir = path.join(specsDir, specId);
         mkdirSync(specDir, { recursive: true });
 
@@ -139,24 +140,6 @@ export function registerInsightsHandlers(
           sourceType: 'insights',
           ...metadata
         };
-
-        // Create initial implementation_plan.json
-        const now = new Date().toISOString();
-        const implementationPlan = {
-          feature: title,
-          description: description,
-          created_at: now,
-          updated_at: now,
-          status: 'pending',
-          phases: []
-        };
-
-        const planPath = path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
-        writeFileSync(planPath, JSON.stringify(implementationPlan, null, 2));
-
-        // Save task metadata
-        const metadataPath = path.join(specDir, 'task_metadata.json');
-        writeFileSync(metadataPath, JSON.stringify(taskMetadata, null, 2));
 
         // Create the task object
         const task: Task = {
@@ -172,6 +155,19 @@ export function registerInsightsHandlers(
           createdAt: new Date(),
           updatedAt: new Date()
         };
+
+        // Write to SQLite database (primary storage)
+        try {
+          const taskStorage = getTaskStorage();
+          taskStorage.createTask(task);
+          console.warn(`[INSIGHTS_CREATE_TASK] Created task in SQLite: ${specId}`);
+        } catch (dbErr) {
+          console.error('[INSIGHTS_CREATE_TASK] Failed to write to SQLite:', dbErr);
+          throw dbErr;
+        }
+
+        // Invalidate cache
+        projectStore.invalidateTasksCache(projectId);
 
         return { success: true, data: task };
       } catch (error) {

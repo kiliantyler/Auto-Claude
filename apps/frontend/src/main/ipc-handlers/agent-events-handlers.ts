@@ -1,29 +1,26 @@
 import type { BrowserWindow } from 'electron';
-import path from 'path';
-import { existsSync, readFileSync } from 'fs';
-import { IPC_CHANNELS, AUTO_BUILD_PATHS, getSpecsDir } from '../../shared/constants';
+import { IPC_CHANNELS } from '../../shared/constants';
 import type {
   SDKRateLimitInfo,
   Task,
   TaskStatus,
   Project,
-  ImplementationPlan,
-  Subtask,
-  SubtaskStatus
+  ExecutionProgress
 } from '../../shared/types';
 import { AgentManager } from '../agent';
 import type { ProcessType, ExecutionProgressData } from '../agent';
 import { titleGenerator } from '../title-generator';
 import { projectStore } from '../project-store';
 import { notificationService } from '../notification-service';
-import { persistPlanStatusSync, getPlanPath } from './task/plan-file-utils';
-import { findTaskWorktree } from '../worktree-paths';
 import { findTaskAndProject } from './task/shared';
 import { getTaskStorage } from '../task-storage';
 
 
 /**
  * Register all agent-events-related IPC handlers
+ *
+ * NOTE: All task data persistence now goes through SQLite database.
+ * JSON files are no longer written or read during runtime.
  */
 export function registerAgenteventsHandlers(
   agentManager: AgentManager,
@@ -102,39 +99,17 @@ export function registerAgenteventsHandlers(
 
         if (task && project) {
           const taskTitle = task.title || task.specId;
-          const mainPlanPath = getPlanPath(project, task);
-          const projectId = project.id; // Capture for closure
+          const projectId = project.id;
 
-          // Capture task values for closure
-          const taskSpecId = task.specId;
-          const projectPath = project.path;
-          const autoBuildPath = project.autoBuildPath;
-
-          // Use shared utility for persisting status (prevents race conditions)
-          // Persist to both main project AND worktree (if exists) for consistency
+          // Persist status to SQLite database
           const persistStatus = (status: TaskStatus) => {
-            // Persist to main project
-            const mainPersisted = persistPlanStatusSync(mainPlanPath, status, projectId);
-            if (mainPersisted) {
-              console.warn(`[Task ${taskId}] Persisted status to main plan: ${status}`);
-            }
-
-            // Also persist to worktree if it exists
-            const worktreePath = findTaskWorktree(projectPath, taskSpecId);
-            if (worktreePath) {
-              const specsBaseDir = getSpecsDir(autoBuildPath);
-              const worktreePlanPath = path.join(
-                worktreePath,
-                specsBaseDir,
-                taskSpecId,
-                AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN
-              );
-              if (existsSync(worktreePlanPath)) {
-                const worktreePersisted = persistPlanStatusSync(worktreePlanPath, status, projectId);
-                if (worktreePersisted) {
-                  console.warn(`[Task ${taskId}] Persisted status to worktree plan: ${status}`);
-                }
-              }
+            try {
+              const storage = getTaskStorage();
+              storage.updateTask(task!.id, { status });
+              projectStore.invalidateTasksCache(projectId);
+              console.warn(`[Task ${taskId}] Persisted status to database: ${status}`);
+            } catch (err) {
+              console.error(`[Task ${taskId}] Failed to persist status:`, err);
             }
           };
 
@@ -198,7 +173,7 @@ export function registerAgenteventsHandlers(
       };
 
       const newStatus = phaseToStatus[progress.phase];
-      if (newStatus) {
+      if (newStatus && task && project) {
         // Include projectId in status change event for multi-project filtering
         mainWindow.webContents.send(
           IPC_CHANNELS.TASK_STATUS_CHANGE,
@@ -207,121 +182,28 @@ export function registerAgenteventsHandlers(
           taskProjectId
         );
 
-        // CRITICAL: Persist status to plan file(s) to prevent flip-flop on task list refresh
-        // When getTasks() is called, it reads status from the plan file. Without persisting,
-        // the status in the file might differ from the UI, causing inconsistent state.
-        // Uses shared utility with locking to prevent race conditions.
-        // IMPORTANT: We persist to BOTH main project AND worktree (if exists) to ensure
-        // consistency, since getTasks() prefers the worktree version.
-        if (task && project) {
-          try {
-            // Persist to main project plan file
-            const mainPlanPath = getPlanPath(project, task);
-            persistPlanStatusSync(mainPlanPath, newStatus, project.id);
+        // Persist status and execution progress to SQLite database
+        try {
+          const storage = getTaskStorage();
+          const executionProgress: ExecutionProgress = {
+            phase: progress.phase,
+            phaseProgress: progress.phaseProgress || 0,
+            overallProgress: progress.overallProgress || 0,
+            currentSubtask: progress.currentSubtask,
+            message: progress.message
+          };
 
-            // Also persist to worktree plan file if it exists
-            // This ensures consistency since getTasks() prefers worktree version
-            const worktreePath = findTaskWorktree(project.path, task.specId);
-            if (worktreePath) {
-              const specsBaseDir = getSpecsDir(project.autoBuildPath);
-              const worktreePlanPath = path.join(
-                worktreePath,
-                specsBaseDir,
-                task.specId,
-                AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN
-              );
-              if (existsSync(worktreePlanPath)) {
-                persistPlanStatusSync(worktreePlanPath, newStatus, project.id);
-              }
-            }
+          storage.updateTask(task.id, {
+            status: newStatus,
+            executionProgress
+          });
 
-            // CRITICAL: Sync plan data (including subtasks) to SQLite database
-            // This ensures subtasks are available even after app restart
-            syncPlanToDatabase(task, project, progress);
-          } catch (err) {
-            // Ignore persistence errors - UI will still work, just might flip on refresh
-            console.warn('[execution-progress] Could not persist status:', err);
-          }
+          projectStore.invalidateTasksCache(project.id);
+          console.debug(`[execution-progress] Updated task ${task.id} status: ${newStatus}`);
+        } catch (err) {
+          console.warn('[execution-progress] Could not persist to database:', err);
         }
       }
     }
   });
-}
-
-/**
- * Sync implementation plan data (subtasks, execution progress) to SQLite database
- * Called during execution-progress events to keep database in sync with plan file
- */
-function syncPlanToDatabase(task: Task, project: Project, progress: ExecutionProgressData): void {
-  try {
-    const specsBaseDir = getSpecsDir(project.autoBuildPath);
-
-    // Try worktree plan first (more up-to-date during execution), then main
-    const worktreePath = findTaskWorktree(project.path, task.specId);
-    let planPath = path.join(project.path, specsBaseDir, task.specId, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
-
-    if (worktreePath) {
-      const worktreePlanPath = path.join(worktreePath, specsBaseDir, task.specId, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
-      if (existsSync(worktreePlanPath)) {
-        planPath = worktreePlanPath;
-      }
-    }
-
-    if (!existsSync(planPath)) {
-      return;
-    }
-
-    // Read and parse the plan file
-    const planContent = readFileSync(planPath, 'utf-8');
-    const plan = JSON.parse(planContent) as ImplementationPlan;
-
-    // Extract subtasks from phases
-    const subtasks: Subtask[] = plan.phases?.flatMap((phase) => {
-      const items = phase.subtasks || [];
-      return items.map((subtask) => {
-        // Handle both 'id' and 'subtask_id' field names
-        const subtaskAny = subtask as unknown as Record<string, unknown>;
-        const subtaskId = subtask.id || (subtaskAny.subtask_id as string);
-        const subtaskDesc = subtask.description || (subtaskAny.title as string);
-
-        // Normalize subtask status
-        let status: SubtaskStatus = 'pending';
-        const rawStatus = (subtask.status || '').toLowerCase();
-        if (rawStatus === 'completed' || rawStatus === 'done' || rawStatus === 'passed') {
-          status = 'completed';
-        } else if (rawStatus === 'in_progress' || rawStatus === 'running') {
-          status = 'in_progress';
-        } else if (rawStatus === 'failed' || rawStatus === 'error') {
-          status = 'failed';
-        }
-
-        return {
-          id: subtaskId,
-          title: subtaskDesc,
-          description: subtaskDesc,
-          status,
-          files: [],
-          verification: subtask.verification
-        };
-      });
-    }) || [];
-
-    // Update SQLite database with subtasks and execution progress
-    const storage = getTaskStorage();
-    storage.updateTask(task.id, {
-      subtasks,
-      executionProgress: {
-        phase: progress.phase,
-        phaseProgress: progress.phaseProgress || 0,
-        overallProgress: progress.overallProgress || 0,
-        currentSubtask: progress.currentSubtask,
-        message: progress.message
-      }
-    });
-
-    console.debug(`[syncPlanToDatabase] Updated task ${task.id} with ${subtasks.length} subtasks`);
-  } catch (err) {
-    // Don't fail execution if sync fails - just log warning
-    console.warn('[syncPlanToDatabase] Failed to sync plan to database:', err);
-  }
 }
