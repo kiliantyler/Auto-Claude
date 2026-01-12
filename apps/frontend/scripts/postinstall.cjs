@@ -63,7 +63,7 @@ function runElectronRebuild() {
   return new Promise((resolve, reject) => {
     const npx = isWindows ? 'npx.cmd' : 'npx';
     const electronVersion = getElectronVersion();
-    const args = ['electron-rebuild'];
+    const args = ['electron-rebuild', '-f', '-w', 'better-sqlite3'];
 
     // Explicitly pass electron version if detected
     if (electronVersion) {
