@@ -50,6 +50,32 @@ export class TaskStorage {
   }
 
   /**
+   * Execute a function within a transaction.
+   *
+   * Automatically handles commit on success and rollback on error.
+   * Use this for atomic multi-task operations (e.g., bulk updates, cascading changes).
+   *
+   * CRITICAL: Do NOT use async/await inside the callback - better-sqlite3
+   * will commit the transaction before awaits complete.
+   *
+   * @param fn - Function to execute within transaction (must be synchronous)
+   * @returns Result of the function
+   *
+   * @example
+   * ```typescript
+   * const storage = new TaskStorage();
+   * storage.withTransaction(() => {
+   *   storage.createTask(task1);
+   *   storage.createTask(task2);
+   *   storage.updateTask(task3.id, { status: 'completed' });
+   * });
+   * ```
+   */
+  withTransaction<T>(fn: () => T): T {
+    return getDatabaseConnection().withTransaction(fn);
+  }
+
+  /**
    * Create a new task in the database
    *
    * @param task - Task object to create
@@ -419,4 +445,31 @@ export function getTaskStorage(): TaskStorage {
     _instance = new TaskStorage();
   }
   return _instance;
+}
+
+/**
+ * Execute a function within a transaction.
+ *
+ * Convenience wrapper around TaskStorage.withTransaction() using the singleton instance.
+ * Automatically handles commit on success and rollback on error.
+ *
+ * CRITICAL: Do NOT use async/await inside the callback - better-sqlite3
+ * will commit the transaction before awaits complete.
+ *
+ * @param fn - Function to execute within transaction (must be synchronous)
+ * @returns Result of the function
+ *
+ * @example
+ * ```typescript
+ * import { withTransaction } from './task-storage';
+ *
+ * withTransaction(() => {
+ *   // Multiple atomic operations
+ *   storage.createTask(task1);
+ *   storage.updateTask(task2.id, { status: 'completed' });
+ * });
+ * ```
+ */
+export function withTransaction<T>(fn: () => T): T {
+  return getTaskStorage().withTransaction(fn);
 }
