@@ -1,5 +1,5 @@
 /**
- * Convert ideation ideas to tasks
+ * Convert ideation ideas to tasks using SQLite storage
  */
 
 import path from 'path';
@@ -14,12 +14,13 @@ import type {
   TaskCategory,
   TaskImpact,
   TaskComplexity,
-  TaskPriority
+  TaskPriority,
+  Idea
 } from '../../../shared/types';
 import { projectStore } from '../../project-store';
-import { readIdeationFile, writeIdeationFile, updateIdeationTimestamp } from './file-utils';
-import type { RawIdea } from './types';
+import { getIdeationStorage } from './ideation-storage';
 import { withSpecNumberLock } from '../../utils/spec-number-lock';
+import { getProjectTaskStorage } from '../../task-storage';
 
 /**
  * Create a slugified version of a title for use in directory names
@@ -35,34 +36,26 @@ function slugifyTitle(title: string): string {
 /**
  * Build task description from idea data
  */
-function buildTaskDescription(idea: RawIdea): string {
+function buildTaskDescription(idea: Idea): string {
   let description = `# ${idea.title}\n\n`;
   description += `${idea.description}\n\n`;
   description += `## Rationale\n${idea.rationale}\n\n`;
 
   if (idea.type === 'code_improvements') {
-    const buildsUpon = idea.builds_upon || [];
+    const buildsUpon = idea.buildsUpon || [];
     if (Array.isArray(buildsUpon) && buildsUpon.length > 0) {
       description += `## Builds Upon\n${buildsUpon.map((b: string) => `- ${b}`).join('\n')}\n\n`;
     }
-    if (idea.implementation_approach) {
-      description += `## Implementation Approach\n${idea.implementation_approach}\n\n`;
+    if (idea.implementationApproach) {
+      description += `## Implementation Approach\n${idea.implementationApproach}\n\n`;
     }
-    const affectedFiles = idea.affected_files || [];
+    const affectedFiles = idea.affectedFiles || [];
     if (Array.isArray(affectedFiles) && affectedFiles.length > 0) {
       description += `## Affected Files\n${affectedFiles.map((f: string) => `- ${f}`).join('\n')}\n\n`;
     }
-    const existingPatterns = idea.existing_patterns || [];
+    const existingPatterns = idea.existingPatterns || [];
     if (Array.isArray(existingPatterns) && existingPatterns.length > 0) {
       description += `## Patterns to Follow\n${existingPatterns.map((p: string) => `- ${p}`).join('\n')}\n\n`;
-    }
-  } else if (idea.type === 'ui_ux_improvements') {
-    description += `## Category\n${idea.category}\n\n`;
-    description += `## Current State\n${idea.current_state}\n\n`;
-    description += `## Proposed Change\n${idea.proposed_change}\n\n`;
-    description += `## User Benefit\n${idea.user_benefit}\n\n`;
-    if (idea.affected_components?.length) {
-      description += `## Affected Components\n${idea.affected_components.map((c: string) => `- ${c}`).join('\n')}\n\n`;
     }
   }
 
@@ -72,7 +65,7 @@ function buildTaskDescription(idea: RawIdea): string {
 /**
  * Build task metadata from idea
  */
-function buildTaskMetadata(idea: RawIdea): TaskMetadata {
+function buildTaskMetadata(idea: Idea): TaskMetadata {
   const metadata: TaskMetadata = {
     sourceType: 'ideation',
     ideationType: idea.type,
@@ -93,36 +86,10 @@ function buildTaskMetadata(idea: RawIdea): TaskMetadata {
 
   // Extract type-specific metadata with proper type casting
   if (idea.type === 'code_improvements') {
-    const effort = idea.estimated_effort as TaskComplexity | undefined;
+    const effort = idea.estimatedEffort as TaskComplexity | undefined;
     metadata.estimatedEffort = effort;
     metadata.complexity = effort;
-    metadata.affectedFiles = idea.affected_files;
-  } else if (idea.type === 'ui_ux_improvements') {
-    metadata.uiuxCategory = idea.category;
-    metadata.affectedFiles = idea.affected_components;
-    metadata.problemSolved = idea.current_state;
-  } else if (idea.type === 'documentation_gaps') {
-    metadata.estimatedEffort = idea.estimated_effort as TaskComplexity | undefined;
-    metadata.priority = idea.priority as TaskPriority | undefined;
-    metadata.targetAudience = idea.target_audience;
-    metadata.affectedFiles = idea.affected_areas;
-  } else if (idea.type === 'security_hardening') {
-    const severity = idea.severity as 'low' | 'medium' | 'high' | 'critical' | undefined;
-    metadata.securitySeverity = severity;
-    metadata.impact = severity as TaskImpact | undefined;
-    metadata.priority = severity === 'critical' ? 'urgent' : severity === 'high' ? 'high' : 'medium';
-    metadata.affectedFiles = idea.affected_files;
-  } else if (idea.type === 'performance_optimizations') {
-    metadata.performanceCategory = idea.category;
-    metadata.impact = idea.impact as TaskImpact | undefined;
-    metadata.estimatedEffort = idea.estimated_effort as TaskComplexity | undefined;
-    metadata.affectedFiles = idea.affected_areas;
-  } else if (idea.type === 'code_quality') {
-    const severity = idea.severity as 'suggestion' | 'minor' | 'major' | 'critical' | undefined;
-    metadata.codeQualitySeverity = severity;
-    metadata.estimatedEffort = idea.estimated_effort as TaskComplexity | undefined;
-    metadata.affectedFiles = idea.affected_files;
-    metadata.priority = severity === 'critical' ? 'urgent' : severity === 'major' ? 'high' : 'medium';
+    metadata.affectedFiles = idea.affectedFiles;
   }
 
   return metadata;
@@ -133,7 +100,7 @@ function buildTaskMetadata(idea: RawIdea): TaskMetadata {
  */
 function createSpecFiles(
   specDir: string,
-  idea: RawIdea,
+  idea: Idea,
   _taskDescription: string
 ): void {
   // Create the spec directory
@@ -188,20 +155,17 @@ export async function convertIdeaToTask(
     return { success: false, error: 'Project not found' };
   }
 
-  const ideationPath = path.join(
-    project.path,
-    AUTO_BUILD_PATHS.IDEATION_DIR,
-    AUTO_BUILD_PATHS.IDEATION_FILE
-  );
-
-  const ideation = readIdeationFile(ideationPath);
-  if (!ideation) {
-    return { success: false, error: 'Ideation not found' };
-  }
-
   try {
+    // Get idea from SQLite storage
+    const storage = getIdeationStorage();
+    const session = storage.getSession(project.path, projectId);
+
+    if (!session) {
+      return { success: false, error: 'Ideation not found' };
+    }
+
     // Find the idea
-    const idea = ideation.ideas?.find((i) => i.id === ideaId);
+    const idea = session.ideas.find((i) => i.id === ideaId);
     if (!idea) {
       return { success: false, error: 'Idea not found' };
     }
@@ -234,13 +198,10 @@ export async function convertIdeaToTask(
       const metadataPath = path.join(specDir, 'task_metadata.json');
       writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
 
-      // Update idea status to archived (converted ideas are archived)
-      idea.status = 'archived';
-      idea.linked_task_id = specId;
-      updateIdeationTimestamp(ideation);
-      writeIdeationFile(ideationPath, ideation);
+      // Update idea status to converted in SQLite
+      storage.updateIdeaLinkedTask(project.path, ideaId, specId);
 
-      // Create task object to return
+      // Create task object
       const task: Task = {
         id: specId,
         specId: specId,
@@ -254,6 +215,19 @@ export async function convertIdeaToTask(
         createdAt: new Date(),
         updatedAt: new Date()
       };
+
+      // Save task to SQLite database
+      try {
+        const taskStorage = getProjectTaskStorage(project.path);
+        taskStorage.createTask(task);
+        console.warn(`[IDEATION_CONVERT] Created task in SQLite: ${specId}`);
+      } catch (dbErr) {
+        console.error('[IDEATION_CONVERT] Failed to write to SQLite:', dbErr);
+        throw dbErr;
+      }
+
+      // Invalidate cache
+      projectStore.invalidateTasksCache(projectId);
 
       return { success: true, data: task };
     });

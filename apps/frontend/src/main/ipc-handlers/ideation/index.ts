@@ -7,5 +7,6 @@ export * from './idea-manager';
 export * from './generation-handlers';
 export * from './task-converter';
 export * from './transformers';
-export * from './file-utils';
+export * from './file-utils';  // Legacy - kept for backward compatibility
 export * from './types';
+export * from './ideation-storage';
