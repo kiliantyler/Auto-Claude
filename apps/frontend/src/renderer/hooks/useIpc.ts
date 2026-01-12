@@ -308,6 +308,65 @@ export function useIpcListeners(): void {
       }
     );
 
+    // Database event listeners (from SQLite triggers)
+    // These provide instant updates (<100ms) replacing the old 1000ms file watcher polling
+    const updateTask = useTaskStore.getState().updateTask;
+    const addTask = useTaskStore.getState().addTask;
+    const currentProjectId = useProjectStore.getState().selectedProjectId;
+
+    const cleanupDbTaskCreated = window.electronAPI.onDatabaseTaskCreated(
+      async (taskId: string) => {
+        console.log(`[DB Event] Task created: ${taskId}`);
+        // Reload the task from the database and add to store
+        if (currentProjectId) {
+          try {
+            const result = await window.electronAPI.getTasks(currentProjectId);
+            if (result.success && result.data) {
+              const newTask = result.data.find(t => t.id === taskId || t.specId === taskId);
+              if (newTask) {
+                addTask(newTask);
+                console.log(`[DB Event] Task ${taskId} added to store`);
+              }
+            }
+          } catch (error) {
+            console.error('[DB Event] Failed to reload created task:', error);
+          }
+        }
+      }
+    );
+
+    const cleanupDbTaskUpdated = window.electronAPI.onDatabaseTaskUpdated(
+      async (taskId: string) => {
+        console.log(`[DB Event] Task updated: ${taskId}`);
+        // Reload the task from the database and update store
+        if (currentProjectId) {
+          try {
+            const result = await window.electronAPI.getTasks(currentProjectId);
+            if (result.success && result.data) {
+              const updatedTask = result.data.find(t => t.id === taskId || t.specId === taskId);
+              if (updatedTask) {
+                updateTask(taskId, updatedTask);
+                console.log(`[DB Event] Task ${taskId} updated in store`);
+              }
+            }
+          } catch (error) {
+            console.error('[DB Event] Failed to reload updated task:', error);
+          }
+        }
+      }
+    );
+
+    const cleanupDbTaskDeleted = window.electronAPI.onDatabaseTaskDeleted(
+      (taskId: string) => {
+        console.log(`[DB Event] Task deleted: ${taskId}`);
+        // Remove task from store
+        const tasks = useTaskStore.getState().tasks;
+        const filteredTasks = tasks.filter(t => t.id !== taskId && t.specId !== taskId);
+        useTaskStore.getState().setTasks(filteredTasks);
+        console.log(`[DB Event] Task ${taskId} removed from store`);
+      }
+    );
+
     // Cleanup on unmount
     return () => {
       // Flush any pending batched updates before cleanup
@@ -327,6 +386,9 @@ export function useIpcListeners(): void {
       cleanupRoadmapStopped();
       cleanupRateLimit();
       cleanupSDKRateLimit();
+      cleanupDbTaskCreated();
+      cleanupDbTaskUpdated();
+      cleanupDbTaskDeleted();
     };
   }, [updateTaskFromPlan, updateTaskStatus, updateExecutionProgress, appendLog, batchAppendLogs, setError]);
 }

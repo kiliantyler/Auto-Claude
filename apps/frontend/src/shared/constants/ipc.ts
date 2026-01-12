@@ -50,6 +50,11 @@ export const IPC_CHANNELS = {
   TASK_STATUS_CHANGE: 'task:statusChange',
   TASK_EXECUTION_PROGRESS: 'task:executionProgress',
 
+  // Database events (main -> renderer) - from SQLite triggers
+  DB_TASK_CREATED: 'db:task:created',
+  DB_TASK_UPDATED: 'db:task:updated',
+  DB_TASK_DELETED: 'db:task:deleted',
+
   // Task phase logs (persistent, collapsible logs by phase)
   TASK_LOGS_GET: 'task:logsGet',           // Load logs from spec dir
   TASK_LOGS_WATCH: 'task:logsWatch',       // Start watching for log changes
