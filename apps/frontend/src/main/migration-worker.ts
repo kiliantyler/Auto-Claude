@@ -11,11 +11,19 @@
  * - INSERT OR IGNORE for idempotency (safe to run multiple times)
  * - Real-time progress events via callback
  * - Uses MigrationTracker to prevent redundant migrations
+ * - Concurrent migration queue prevents race conditions
+ *
+ * Concurrency Control:
+ * - Per-project locks ensure only one migration runs per project at a time
+ * - Subsequent migration requests for the same project are queued
+ * - Uses in-memory promise chain for thread-safe serialization
+ * - Prevents race conditions on migration tracker and database inserts
  *
  * Usage:
  * ```typescript
  * const worker = new MigrationWorker();
  *
+ * // Safe to call multiple times - will be queued automatically
  * worker.migrate(projectPath, (progress) => {
  *   console.log(`${progress.percentage}% - ${progress.currentFile}`);
  * });
@@ -27,6 +35,49 @@ import path from 'path';
 import { getDatabaseConnection } from './database';
 import { getMigrationTracker } from './migration-tracker';
 import type { Task, TaskLogs } from '../shared/types';
+
+/**
+ * In-memory locks for migration operations
+ * Key: project path, Value: Promise chain for serializing migrations
+ *
+ * This prevents concurrent migrations of the same project, which could cause:
+ * - Race conditions on migration tracker state
+ * - Duplicate database inserts (despite INSERT OR IGNORE)
+ * - Inconsistent progress reporting
+ */
+const migrationLocks = new Map<string, Promise<void>>();
+
+/**
+ * Serialize migration operations for a specific project to prevent race conditions.
+ * Each migration waits for the previous one to complete before starting.
+ *
+ * @param projectPath - Absolute path to the project directory
+ * @param operation - Async function to execute while holding the lock
+ * @returns Promise that resolves with the operation's result
+ */
+async function withMigrationLock<T>(projectPath: string, operation: () => Promise<T>): Promise<T> {
+  // Get or create the lock chain for this project
+  const currentLock = migrationLocks.get(projectPath) || Promise.resolve();
+
+  // Create a new promise that will resolve after our operation completes
+  let resolve: () => void;
+  const newLock = new Promise<void>((r) => { resolve = r; });
+  migrationLocks.set(projectPath, newLock);
+
+  try {
+    // Wait for any previous operation to complete
+    await currentLock;
+    // Execute our operation
+    return await operation();
+  } finally {
+    // Release the lock
+    resolve!();
+    // Clean up if this was the last operation
+    if (migrationLocks.get(projectPath) === newLock) {
+      migrationLocks.delete(projectPath);
+    }
+  }
+}
 
 /**
  * Migration progress data sent via callback
@@ -69,12 +120,35 @@ export class MigrationWorker {
   /**
    * Migrate a project's JSON files to SQLite
    *
+   * This method is thread-safe and prevents concurrent migrations of the same project.
+   * If a migration is already in progress for the project, subsequent calls will wait
+   * in a queue until the current migration completes.
+   *
    * @param projectPath - Absolute path to the project directory
    * @param onProgress - Callback for progress updates (optional)
    * @param options - Migration options (optional)
    * @returns Promise that resolves when migration is complete
    */
   async migrate(
+    projectPath: string,
+    onProgress?: ProgressCallback,
+    options?: MigrationOptions
+  ): Promise<void> {
+    // Wrap migration in lock to prevent concurrent migrations of the same project
+    return withMigrationLock(projectPath, async () => {
+      return this.migrateInternal(projectPath, onProgress, options);
+    });
+  }
+
+  /**
+   * Internal migration implementation (called within lock)
+   *
+   * @param projectPath - Absolute path to the project directory
+   * @param onProgress - Callback for progress updates (optional)
+   * @param options - Migration options (optional)
+   * @returns Promise that resolves when migration is complete
+   */
+  private async migrateInternal(
     projectPath: string,
     onProgress?: ProgressCallback,
     options?: MigrationOptions
