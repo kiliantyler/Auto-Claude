@@ -67,6 +67,12 @@ setupErrorLogging();
 // Initialize Sentry for error tracking (respects user's sentryEnabled setting)
 initSentryMain();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Migration state tracking
+// ─────────────────────────────────────────────────────────────────────────────
+/** Flag to track if migration is currently in progress */
+let isMigrationInProgress = false;
+
 /**
  * Load app settings synchronously (for use during startup).
  * This is a simple merge with defaults - no migrations or auto-detection.
@@ -171,6 +177,9 @@ async function detectAndMigrateProjects(): Promise<void> {
 
   console.log(`[Migration] Checking ${projects.length} project(s) for migration...`);
 
+  // Set migration in progress flag
+  isMigrationInProgress = true;
+
   // Process each project sequentially to avoid database lock conflicts
   for (const project of projects) {
     try {
@@ -215,6 +224,9 @@ async function detectAndMigrateProjects(): Promise<void> {
       // Continue with next project even if one fails
     }
   }
+
+  // Clear migration in progress flag
+  isMigrationInProgress = false;
 
   console.log('[Migration] Migration detection completed');
 }
@@ -581,6 +593,14 @@ app.on('window-all-closed', () => {
 
 // Cleanup before quit
 app.on('before-quit', async () => {
+  // Check if migration is in progress
+  if (isMigrationInProgress) {
+    console.warn(
+      '[main] WARNING: App is quitting while migration is in progress. ' +
+      'Migration will be interrupted and can be retried on next app start.'
+    );
+  }
+
   // Stop usage monitor
   const usageMonitor = getUsageMonitor();
   usageMonitor.stop();
