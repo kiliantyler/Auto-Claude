@@ -37,6 +37,7 @@ import type {
   AnalyticsQueryOptions,
   DatabaseMetricsRow,
   AnalyticsPeriod,
+  TaskMetricsData,
 } from '../shared/types';
 import { getDatabaseConnection } from './database';
 
@@ -583,6 +584,269 @@ export class AnalyticsService {
       byStatus: [],
       totalTasks: 0,
     };
+  }
+
+  /**
+   * Calculate and store daily metrics for a specific date
+   *
+   * Aggregates task metrics for the given date (or today) and stores them
+   * in the task_metrics table. Uses UPSERT to update existing entries.
+   *
+   * @param date - The date to calculate metrics for (ISO format: YYYY-MM-DD, defaults to today)
+   * @param projectId - Optional project ID to calculate metrics for (all projects if not specified)
+   * @returns Object with success status and metrics count
+   */
+  calculateDailyMetrics(
+    date?: string,
+    projectId?: string
+  ): { success: boolean; metricsCalculated: number; error?: string } {
+    if (!this.ENABLE_ANALYTICS) {
+      return { success: false, metricsCalculated: 0, error: 'Analytics feature is disabled' };
+    }
+
+    try {
+      const db = getDatabaseConnection().getConnection();
+
+      // Use provided date or default to today
+      const metricDate = date || new Date().toISOString().split('T')[0];
+
+      // Get list of projects to calculate metrics for
+      let projectIds: string[];
+      if (projectId) {
+        projectIds = [projectId];
+      } else {
+        // Get all distinct project IDs from tasks table
+        const projectsQuery = db.prepare('SELECT DISTINCT project_id FROM tasks WHERE project_id IS NOT NULL');
+        const projectRows = projectsQuery.all() as { project_id: string }[];
+        projectIds = projectRows.map((row) => row.project_id);
+      }
+
+      let metricsCalculated = 0;
+
+      for (const projId of projectIds) {
+        // Calculate task counts by status
+        const countsQuery = db.prepare(`
+          SELECT
+            COUNT(*) as total_tasks,
+            SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as completed_tasks,
+            SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_tasks,
+            SUM(CASE WHEN status = 'ai_review' OR status = 'human_review' THEN 1 ELSE 0 END) as blocked_tasks
+          FROM tasks
+          WHERE project_id = ?
+            AND (metadata_json IS NULL OR metadata_json NOT LIKE '%"archivedAt"%')
+        `);
+        const counts = countsQuery.get(projId) as {
+          total_tasks: number;
+          completed_tasks: number;
+          in_progress_tasks: number;
+          blocked_tasks: number;
+        };
+
+        // Count tasks created on this date
+        const createdQuery = db.prepare(`
+          SELECT COUNT(*) as count
+          FROM tasks
+          WHERE project_id = ?
+            AND date(created_at) = ?
+        `);
+        const createdResult = createdQuery.get(projId, metricDate) as { count: number };
+
+        // Count tasks completed on this date (status changed to 'done' on this date)
+        // We check the task_history table for status_changed events to 'done'
+        const completedQuery = db.prepare(`
+          SELECT COUNT(DISTINCT task_id) as count
+          FROM task_history
+          WHERE date(timestamp) = ?
+            AND action = 'status_changed'
+            AND json_extract(new_value, '$.status') = 'done'
+            AND task_id IN (SELECT id FROM tasks WHERE project_id = ?)
+        `);
+        const completedResult = completedQuery.get(metricDate, projId) as { count: number };
+
+        // Calculate average completion time for tasks completed on this date
+        // This is the time between task creation and completion
+        const avgTimeQuery = db.prepare(`
+          SELECT AVG(
+            (julianday(h.timestamp) - julianday(t.created_at)) * 24
+          ) as avg_hours
+          FROM task_history h
+          JOIN tasks t ON h.task_id = t.id
+          WHERE t.project_id = ?
+            AND date(h.timestamp) = ?
+            AND h.action = 'status_changed'
+            AND json_extract(h.new_value, '$.status') = 'done'
+        `);
+        const avgTimeResult = avgTimeQuery.get(projId, metricDate) as { avg_hours: number | null };
+
+        // Round average completion time to 2 decimal places
+        const avgCompletionTimeHours =
+          avgTimeResult.avg_hours !== null ? Math.round(avgTimeResult.avg_hours * 100) / 100 : null;
+
+        // Upsert metrics into task_metrics table
+        const upsertQuery = db.prepare(`
+          INSERT INTO task_metrics (
+            project_id,
+            metric_date,
+            total_tasks,
+            completed_tasks,
+            in_progress_tasks,
+            blocked_tasks,
+            avg_completion_time_hours,
+            created_count,
+            completed_count
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(project_id, metric_date) DO UPDATE SET
+            total_tasks = excluded.total_tasks,
+            completed_tasks = excluded.completed_tasks,
+            in_progress_tasks = excluded.in_progress_tasks,
+            blocked_tasks = excluded.blocked_tasks,
+            avg_completion_time_hours = excluded.avg_completion_time_hours,
+            created_count = excluded.created_count,
+            completed_count = excluded.completed_count
+        `);
+
+        upsertQuery.run(
+          projId,
+          metricDate,
+          counts.total_tasks || 0,
+          counts.completed_tasks || 0,
+          counts.in_progress_tasks || 0,
+          counts.blocked_tasks || 0,
+          avgCompletionTimeHours,
+          createdResult.count || 0,
+          completedResult.count || 0
+        );
+
+        metricsCalculated++;
+      }
+
+      return { success: true, metricsCalculated };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error calculating daily metrics';
+      console.error('[AnalyticsService] Failed to calculate daily metrics:', error);
+      return { success: false, metricsCalculated: 0, error: errorMessage };
+    }
+  }
+
+  /**
+   * Calculate and store metrics for a date range
+   *
+   * Useful for backfilling historical metrics or recalculating after data changes.
+   *
+   * @param startDate - Start date (ISO format: YYYY-MM-DD)
+   * @param endDate - End date (ISO format: YYYY-MM-DD)
+   * @param projectId - Optional project ID to calculate metrics for
+   * @returns Object with success status and total metrics count
+   */
+  calculateMetricsForRange(
+    startDate: string,
+    endDate: string,
+    projectId?: string
+  ): { success: boolean; totalMetrics: number; errors: string[] } {
+    if (!this.ENABLE_ANALYTICS) {
+      return { success: false, totalMetrics: 0, errors: ['Analytics feature is disabled'] };
+    }
+
+    const errors: string[] = [];
+    let totalMetrics = 0;
+
+    try {
+      // Generate date range
+      const dates = this.generateDateRange(startDate, endDate);
+
+      for (const date of dates) {
+        const result = this.calculateDailyMetrics(date, projectId);
+        if (result.success) {
+          totalMetrics += result.metricsCalculated;
+        } else if (result.error) {
+          errors.push(`${date}: ${result.error}`);
+        }
+      }
+
+      return { success: errors.length === 0, totalMetrics, errors };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      errors.push(errorMessage);
+      return { success: false, totalMetrics, errors };
+    }
+  }
+
+  /**
+   * Get stored metrics from the task_metrics table
+   *
+   * @param options - Query options (date range, project filter)
+   * @returns Array of TaskMetricsData objects
+   */
+  getStoredMetrics(options?: AnalyticsQueryOptions): TaskMetricsData[] {
+    if (!this.ENABLE_ANALYTICS) {
+      return [];
+    }
+
+    try {
+      const db = getDatabaseConnection().getConnection();
+      const { startDate, endDate } = this.getDateRange(options);
+
+      let query = `
+        SELECT *
+        FROM task_metrics
+        WHERE metric_date >= ? AND metric_date <= ?
+      `;
+      const params: unknown[] = [startDate, endDate];
+
+      if (options?.projectId) {
+        query += ' AND project_id = ?';
+        params.push(options.projectId);
+      }
+
+      query += ' ORDER BY metric_date ASC, project_id ASC';
+
+      const stmt = db.prepare(query);
+      const rows = stmt.all(...params) as DatabaseMetricsRow[];
+
+      return rows.map((row) => ({
+        id: row.id,
+        projectId: row.project_id,
+        metricDate: row.metric_date,
+        totalTasks: row.total_tasks || 0,
+        completedTasks: row.completed_tasks || 0,
+        inProgressTasks: row.in_progress_tasks || 0,
+        blockedTasks: row.blocked_tasks || 0,
+        avgCompletionTimeHours: row.avg_completion_time_hours,
+        createdCount: row.created_count || 0,
+        completedCount: row.completed_count || 0,
+      }));
+    } catch (error) {
+      console.error('[AnalyticsService] Failed to get stored metrics:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Clean up old metrics data
+   *
+   * @param daysToKeep - Number of days of metrics to keep (default: 365)
+   * @returns Number of rows deleted
+   */
+  cleanupOldMetrics(daysToKeep: number = 365): number {
+    if (!this.ENABLE_ANALYTICS) {
+      return 0;
+    }
+
+    try {
+      const db = getDatabaseConnection().getConnection();
+
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+      const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+
+      const deleteStmt = db.prepare('DELETE FROM task_metrics WHERE metric_date < ?');
+      const result = deleteStmt.run(cutoffDateStr);
+
+      return result.changes;
+    } catch (error) {
+      console.error('[AnalyticsService] Failed to cleanup old metrics:', error);
+      return 0;
+    }
   }
 }
 
