@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import path from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { app } from 'electron';
@@ -610,7 +610,7 @@ export class AgentProcessManager {
   }
 
   /**
-   * Kill a specific task's process
+   * Kill a specific task's process and all its children
    */
   killProcess(taskId: string): boolean {
     const agentProcess = this.state.getProcess(taskId);
@@ -619,23 +619,74 @@ export class AgentProcessManager {
         // Mark this specific spawn as killed so its exit handler knows to ignore
         this.state.markSpawnAsKilled(agentProcess.spawnId);
 
-        // Send SIGTERM first for graceful shutdown
-        agentProcess.process.kill('SIGTERM');
-
-        // Force kill after timeout
-        setTimeout(() => {
-          if (!agentProcess.process.killed) {
-            agentProcess.process.kill('SIGKILL');
-          }
-        }, 5000);
+        const pid = agentProcess.process.pid;
+        if (pid) {
+          // Kill the entire process tree (parent + all descendants)
+          // On Unix, negative PID sends signal to entire process group
+          // But we need to ensure we started as process group leader
+          // Instead, use tree-kill pattern: find and kill all children first
+          this.killProcessTree(pid);
+        } else {
+          // Fallback if no PID (shouldn't happen)
+          agentProcess.process.kill('SIGTERM');
+        }
 
         this.state.deleteProcess(taskId);
         return true;
-      } catch {
+      } catch (err) {
+        console.error('[AgentProcess] Error killing process:', err);
         return false;
       }
     }
     return false;
+  }
+
+  /**
+   * Kill a process and all its descendants
+   */
+  private killProcessTree(pid: number): void {
+    try {
+      if (process.platform === 'win32') {
+        // On Windows, use taskkill with /T flag to kill tree
+        try {
+          execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' });
+        } catch {
+          // Process may already be dead
+        }
+      } else {
+        // On Unix (macOS, Linux), kill children first then parent
+        try {
+          // Kill all child processes
+          execSync(`pkill -TERM -P ${pid}`, { stdio: 'ignore' });
+        } catch {
+          // No children or already dead
+        }
+
+        // Then kill the parent
+        try {
+          process.kill(pid, 'SIGTERM');
+        } catch {
+          // Process may already be dead
+        }
+
+        // Force kill after timeout
+        setTimeout(() => {
+          try {
+            // Force kill any remaining children
+            execSync(`pkill -KILL -P ${pid}`, { stdio: 'ignore' });
+          } catch {
+            // Already dead
+          }
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // Already dead
+          }
+        }, 2000);
+      }
+    } catch (err) {
+      console.error('[AgentProcess] Error in killProcessTree:', err);
+    }
   }
 
   /**

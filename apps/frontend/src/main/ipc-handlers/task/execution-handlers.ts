@@ -13,6 +13,7 @@ import { findTaskWorktree } from '../../worktree-paths';
 import { projectStore } from '../../project-store';
 import { getToolPath } from '../../cli-tool-manager';
 import { getProjectTaskStorage } from '../../task-storage';
+import { taskLogService } from '../../task-log-service';
 
 /**
  * NOTE: Task execution handlers - ALL task data persistence goes through SQLite.
@@ -486,8 +487,15 @@ export function registerTaskExecutionHandlers(
           qaReport: undefined,  // Clear QA report too
         });
 
+        // Clear task logs from SQLite so the logs page shows fresh logs on next run
+        storage.clearTaskLogs(task.id);
+
+        // Also clear the in-memory log cache in TaskLogService
+        taskLogService.clearCache(mainSpecDir);
+        taskLogService.stopWatching(task.specId);
+
         if (DEBUG) {
-          console.log(`[TASK_RESET] Updated task in database: ${task.id} -> backlog, cleared subtasks and QA report`);
+          console.log(`[TASK_RESET] Updated task in database: ${task.id} -> backlog, cleared subtasks, QA report, and logs`);
         }
       } catch (dbErr) {
         console.error('[TASK_RESET] Failed to update task status in database:', dbErr);

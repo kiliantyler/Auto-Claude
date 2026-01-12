@@ -107,6 +107,9 @@ class LogStorage:
             "subtask_id": entry.subtask_id,
             "tool_name": entry.tool_name,
             "tool_input": entry.tool_input,
+            "detail": entry.detail,
+            "subphase": entry.subphase,
+            "collapsed": entry.collapsed,
         }
         self.logs_repo.log(
             message=entry.content,

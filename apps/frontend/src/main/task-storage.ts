@@ -381,6 +381,28 @@ export class TaskStorage {
   }
 
   /**
+   * Clear all task logs for a specific task
+   *
+   * @param taskId - Task ID
+   * @returns Number of logs deleted
+   */
+  clearTaskLogs(taskId: string): number {
+    try {
+      const db = this.dbConnection.getConnection();
+
+      const stmt = db.prepare('DELETE FROM task_logs WHERE task_id = ?');
+      const result = stmt.run(taskId);
+
+      console.log(`[TaskStorage] Cleared ${result.changes} logs for task: ${taskId}`);
+
+      return result.changes;
+    } catch (error) {
+      console.error(`[TaskStorage] Failed to clear logs for task ${taskId}:`, error);
+      return 0;
+    }
+  }
+
+  /**
    * Convert database row to Task object
    *
    * @param row - Database row

@@ -373,6 +373,25 @@ CREATE TABLE IF NOT EXISTS migration_status (
 );
 
 -- ============================================
+-- Task Logs Table
+-- ============================================
+
+-- Task logs (phase-based logs from Python backend)
+-- Replaces task_logs.json files with SQLite storage
+CREATE TABLE IF NOT EXISTS task_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  subtask_id TEXT,
+  log_type TEXT NOT NULL,  -- 'info' | 'warning' | 'error' | 'debug' | 'agent' | 'tool' | 'phase_status' | 'phase_start'
+  message TEXT NOT NULL,
+  details_json TEXT,  -- JSON object with additional details (phase, tool_name, tool_input, session, etc.)
+  agent_name TEXT,  -- Which agent generated this log
+  session_id TEXT,  -- Session ID for grouping
+  timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+-- ============================================
 -- Indexes for Query Optimization
 -- ============================================
 
@@ -443,6 +462,13 @@ CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp ON session_messages(ti
 
 -- Migration status indexes
 CREATE INDEX IF NOT EXISTS idx_migration_status_type ON migration_status(data_type);
+
+-- Task logs indexes
+CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_logs_subtask ON task_logs(subtask_id);
+CREATE INDEX IF NOT EXISTS idx_task_logs_type ON task_logs(log_type);
+CREATE INDEX IF NOT EXISTS idx_task_logs_timestamp ON task_logs(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_task_logs_session ON task_logs(session_id);
 
 -- ============================================
 -- Triggers for Event System
@@ -618,7 +644,7 @@ END;
 -- ============================================
 
 -- Schema version metadata
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '005');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '006');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_type', 'project-local');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('last_migration', datetime('now'));

@@ -1,8 +1,8 @@
 import path from 'path';
-import { existsSync, readFileSync, watchFile } from 'fs';
 import { EventEmitter } from 'events';
-import type { TaskLogs, TaskLogPhase, TaskLogStreamChunk, TaskPhaseLog } from '../shared/types';
+import type { TaskLogs, TaskLogPhase, TaskLogStreamChunk, TaskPhaseLog, TaskLogEntry } from '../shared/types';
 import { findTaskWorktree } from './worktree-paths';
+import { getProjectDatabaseManager } from './database';
 
 function findWorktreeSpecDir(projectPath: string, specId: string, specsRelPath: string): string | null {
   const worktreePath = findTaskWorktree(projectPath, specId);
@@ -13,26 +13,59 @@ function findWorktreeSpecDir(projectPath: string, specId: string, specsRelPath: 
 }
 
 /**
- * Service for loading and watching phase-based task logs (task_logs.json)
+ * Extract spec_id from a spec directory path.
+ * E.g., /project/.auto-claude/specs/001-feature -> 001-feature
+ */
+function extractSpecId(specDir: string): string {
+  return path.basename(specDir);
+}
+
+/**
+ * Detect the main project directory from a spec_dir path.
+ * Handles both main project and worktree scenarios.
+ */
+function detectProjectDir(specDir: string): string | null {
+  const resolved = path.resolve(specDir);
+
+  // Check if this is a worktree path
+  const worktreeMarker = '/.auto-claude/worktrees/';
+  if (resolved.includes(worktreeMarker)) {
+    // Extract main project path (everything before .auto-claude/worktrees/)
+    return resolved.split(worktreeMarker)[0];
+  }
+
+  // Standard case: spec_dir is /project/.auto-claude/specs/XXX
+  // Go up: XXX -> specs -> .auto-claude -> project
+  const parts = resolved.split(path.sep);
+  const autoClaudeIndex = parts.indexOf('.auto-claude');
+  if (autoClaudeIndex > 0) {
+    return parts.slice(0, autoClaudeIndex).join(path.sep);
+  }
+
+  return null;
+}
+
+/**
+ * Service for loading and watching phase-based task logs from SQLite
  *
  * This service provides:
- * - Loading logs from the spec directory (and worktree spec directory when active)
- * - Watching for log file changes
+ * - Loading logs from SQLite database (task_logs table)
+ * - Watching for log changes via polling
  * - Emitting streaming updates when logs change
  * - Determining which phase is currently active
  *
- * Note: When a task runs in isolated mode (worktrees), the build logs are written to
- * the worktree's spec directory, not the main project's spec directory. This service
- * watches both locations and merges logs from both sources.
+ * Note: Logs are written by the Python backend to SQLite.
+ * This service queries the database and transforms flat rows into
+ * the phase-grouped TaskLogs structure expected by the UI.
  */
 export class TaskLogService extends EventEmitter {
-  private watchers: Map<string, { watcher: ReturnType<typeof watchFile>; specDir: string }> = new Map();
   private logCache: Map<string, TaskLogs> = new Map();
   private pollIntervals: Map<string, NodeJS.Timeout> = new Map();
-  // Store paths being watched for each specId (main + worktree)
-  private watchedPaths: Map<string, { mainSpecDir: string; worktreeSpecDir: string | null; specsRelPath: string }> = new Map();
+  private lastLogCounts: Map<string, number> = new Map();
+  // Store paths being watched for each specId
+  private watchedPaths: Map<string, { mainSpecDir: string; worktreeSpecDir: string | null; specsRelPath: string; projectPath: string }> = new Map();
 
-  // Poll interval for watching log changes (more reliable than fs.watch on some systems)
+  // Poll interval for watching log changes
   private readonly POLL_INTERVAL_MS = 1000;
 
   constructor() {
@@ -40,36 +73,204 @@ export class TaskLogService extends EventEmitter {
   }
 
   /**
-   * Load task logs from a single spec directory
-   * Returns cached logs if the file is corrupted (e.g., mid-write by Python backend)
+   * Load task logs from SQLite for a specific spec.
+   * Returns cached logs if database query fails.
    */
   loadLogsFromPath(specDir: string): TaskLogs | null {
-    const logFile = path.join(specDir, 'task_logs.json');
+    const specId = extractSpecId(specDir);
+    const projectPath = detectProjectDir(specDir);
 
-    if (!existsSync(logFile)) {
-      return null;
+    if (!projectPath) {
+      console.warn(`[TaskLogService] Could not detect project path from: ${specDir}`);
+      return this.logCache.get(specDir) || null;
     }
 
     try {
-      const content = readFileSync(logFile, 'utf-8');
-      const logs = JSON.parse(content) as TaskLogs;
+      const dbManager = getProjectDatabaseManager();
+      const conn = dbManager.getConnection(projectPath);
+      const db = conn.getConnection();
+
+      // Get task_id for this spec
+      const taskRow = db.prepare('SELECT id FROM tasks WHERE spec_id = ?').get(specId) as { id: string } | undefined;
+      if (!taskRow) {
+        // No task found - return empty structure
+        return this.createEmptyLogs(specId);
+      }
+
+      const taskId = taskRow.id;
+
+      // Query all logs for this task, ordered by timestamp ascending
+      const rows = db.prepare(`
+        SELECT id, subtask_id, log_type, message, details_json, agent_name, session_id, timestamp
+        FROM task_logs
+        WHERE task_id = ?
+        ORDER BY timestamp ASC
+      `).all(taskId) as Array<{
+        id: number;
+        subtask_id: string | null;
+        log_type: string;
+        message: string;
+        details_json: string | null;
+        agent_name: string | null;
+        session_id: string | null;
+        timestamp: string;
+      }>;
+
+      // Transform rows into TaskLogs structure
+      const logs = this.transformRowsToTaskLogs(specId, rows);
       this.logCache.set(specDir, logs);
       return logs;
     } catch (error) {
-      // JSON parse error - file may be mid-write, return cached version if available
+      // Database error - return cached version if available
       const cached = this.logCache.get(specDir);
       if (cached) {
-        // Silently return cached version - this is expected during concurrent access
         return cached;
       }
-      // Only log if we have no cached fallback
-      console.error(`[TaskLogService] Failed to load logs from ${logFile}:`, error);
+      console.error(`[TaskLogService] Failed to load logs from database for ${specDir}:`, error);
       return null;
     }
   }
 
   /**
-   * Merge logs from main and worktree spec directories
+   * Create an empty TaskLogs structure.
+   */
+  private createEmptyLogs(specId: string): TaskLogs {
+    const now = new Date().toISOString();
+    return {
+      spec_id: specId,
+      created_at: now,
+      updated_at: now,
+      phases: {
+        planning: { phase: 'planning', status: 'pending', started_at: null, completed_at: null, entries: [] },
+        coding: { phase: 'coding', status: 'pending', started_at: null, completed_at: null, entries: [] },
+        validation: { phase: 'validation', status: 'pending', started_at: null, completed_at: null, entries: [] },
+      },
+    };
+  }
+
+  /**
+   * Transform flat database rows into the phase-grouped TaskLogs structure.
+   */
+  private transformRowsToTaskLogs(specId: string, rows: Array<{
+    id: number;
+    subtask_id: string | null;
+    log_type: string;
+    message: string;
+    details_json: string | null;
+    agent_name: string | null;
+    session_id: string | null;
+    timestamp: string;
+  }>): TaskLogs {
+    const now = new Date().toISOString();
+    const logs: TaskLogs = {
+      spec_id: specId,
+      created_at: rows.length > 0 ? rows[0].timestamp : now,
+      updated_at: rows.length > 0 ? rows[rows.length - 1].timestamp : now,
+      phases: {
+        planning: { phase: 'planning', status: 'pending', started_at: null, completed_at: null, entries: [] },
+        coding: { phase: 'coding', status: 'pending', started_at: null, completed_at: null, entries: [] },
+        validation: { phase: 'validation', status: 'pending', started_at: null, completed_at: null, entries: [] },
+      },
+    };
+
+    for (const row of rows) {
+      let details: Record<string, unknown> = {};
+      if (row.details_json) {
+        try {
+          details = JSON.parse(row.details_json);
+        } catch {
+          // Invalid JSON - ignore
+        }
+      }
+
+      // Handle phase status and start log entries (metadata, not displayed)
+      if (row.log_type === 'phase_status') {
+        const phase = details.phase as TaskLogPhase;
+        const status = details.status as string;
+        if (phase && logs.phases[phase]) {
+          if (status === 'active') {
+            logs.phases[phase].status = 'active';
+          } else if (status === 'completed') {
+            logs.phases[phase].status = 'completed';
+            logs.phases[phase].completed_at = (details.completed_at as string) || row.timestamp;
+          } else if (status === 'failed') {
+            logs.phases[phase].status = 'failed';
+            logs.phases[phase].completed_at = row.timestamp;
+          }
+        }
+        continue;
+      }
+
+      if (row.log_type === 'phase_start') {
+        const phase = details.phase as TaskLogPhase;
+        if (phase && logs.phases[phase]) {
+          logs.phases[phase].started_at = (details.started_at as string) || row.timestamp;
+          if (logs.phases[phase].status === 'pending') {
+            logs.phases[phase].status = 'active';
+          }
+        }
+        continue;
+      }
+
+      // Regular log entry - add to appropriate phase
+      const phase = (details.phase as TaskLogPhase) || 'planning';
+      if (!logs.phases[phase]) {
+        continue; // Unknown phase
+      }
+
+      // Map log_type to TaskLogEntryType
+      const entryType = this.mapLogType(row.log_type);
+
+      const entry: TaskLogEntry = {
+        timestamp: row.timestamp,
+        type: entryType,
+        content: row.message,
+        phase: phase,
+        tool_name: details.tool_name as string | undefined,
+        tool_input: details.tool_input as string | undefined,
+        subtask_id: row.subtask_id || (details.subtask_id as string | undefined),
+        session: details.session as number | undefined,
+        // Fields for expandable detail view
+        detail: details.detail as string | undefined,
+        subphase: details.subphase as string | undefined,
+        collapsed: details.collapsed as boolean | undefined,
+      };
+
+      logs.phases[phase].entries.push(entry);
+    }
+
+    return logs;
+  }
+
+  /**
+   * Map backend log_type to frontend TaskLogEntryType.
+   */
+  private mapLogType(logType: string): TaskLogEntry['type'] {
+    switch (logType) {
+      case 'tool':
+      case 'tool_start':
+        return 'tool_start';
+      case 'tool_end':
+        return 'tool_end';
+      case 'error':
+        return 'error';
+      case 'success':
+        return 'success';
+      case 'info':
+        return 'info';
+      case 'agent':
+        return 'text';
+      case 'warning':
+        return 'info';
+      case 'debug':
+        return 'info';
+      default:
+        return 'text';
+    }
+  }
+
+  /**
+   * Merge logs from main and worktree spec directories.
    */
   private mergeLogs(mainLogs: TaskLogs | null, worktreeLogs: TaskLogs | null, specDir: string): TaskLogs | null {
     if (!worktreeLogs) {
@@ -106,8 +307,8 @@ export class TaskLogService extends EventEmitter {
   }
 
   /**
-   * Load and merge task logs from main spec dir and worktree spec dir
-   * Planning phase logs are in main spec dir, coding/validation logs may be in worktree
+   * Load and merge task logs from main spec dir and worktree spec dir.
+   * Planning phase logs are in main spec dir, coding/validation logs may be in worktree.
    *
    * @param specDir - Main project spec directory
    * @param projectPath - Optional: Project root path (needed to find worktree if not registered)
@@ -147,7 +348,7 @@ export class TaskLogService extends EventEmitter {
   }
 
   /**
-   * Get the currently active phase from logs
+   * Get the currently active phase from logs.
    */
   getActivePhase(specDir: string): TaskLogPhase | null {
     const logs = this.loadLogs(specDir);
@@ -163,7 +364,7 @@ export class TaskLogService extends EventEmitter {
   }
 
   /**
-   * Get logs for a specific phase
+   * Get logs for a specific phase.
    */
   getPhaseLog(specDir: string, phase: TaskLogPhase): TaskPhaseLog | null {
     const logs = this.loadLogs(specDir);
@@ -172,8 +373,8 @@ export class TaskLogService extends EventEmitter {
   }
 
   /**
-   * Start watching a spec directory for log changes
-   * Also watches the worktree spec directory if it exists (for coding/validation phases)
+   * Start watching a spec directory for log changes.
+   * Polls the SQLite database for new log entries.
    *
    * @param specId - The spec ID (e.g., "013-screenshots-on-tasks")
    * @param specDir - Main project spec directory
@@ -191,113 +392,71 @@ export class TaskLogService extends EventEmitter {
     // Stop any existing watch (different spec dir or first time)
     this.stopWatching(specId);
 
-    const mainLogFile = path.join(specDir, 'task_logs.json');
+    // Detect project path if not provided
+    const resolvedProjectPath = projectPath || detectProjectDir(specDir);
+    if (!resolvedProjectPath) {
+      console.warn(`[TaskLogService] Cannot start watching - no project path for: ${specDir}`);
+      return;
+    }
 
     // Calculate worktree spec directory path if we have project info
     let worktreeSpecDir: string | null = null;
-    if (projectPath && specsRelPath) {
-      worktreeSpecDir = findWorktreeSpecDir(projectPath, specId, specsRelPath);
+    if (resolvedProjectPath && specsRelPath) {
+      worktreeSpecDir = findWorktreeSpecDir(resolvedProjectPath, specId, specsRelPath);
     }
 
     // Store watched paths for this specId
     this.watchedPaths.set(specId, {
       mainSpecDir: specDir,
       worktreeSpecDir,
-      specsRelPath: specsRelPath || ''
+      specsRelPath: specsRelPath || '',
+      projectPath: resolvedProjectPath
     });
 
-    let lastMainContent = '';
-    let lastWorktreeContent = '';
-
-    // Initial load from main spec dir
-    if (existsSync(mainLogFile)) {
-      try {
-        lastMainContent = readFileSync(mainLogFile, 'utf-8');
-      } catch (_e) {
-        // Ignore parse errors on initial load
-      }
-    }
-
-    // Initial load from worktree spec dir
-    if (worktreeSpecDir) {
-      const worktreeLogFile = path.join(worktreeSpecDir, 'task_logs.json');
-      if (existsSync(worktreeLogFile)) {
-        try {
-          lastWorktreeContent = readFileSync(worktreeLogFile, 'utf-8');
-        } catch (_e) {
-          // Ignore parse errors on initial load
-        }
-      }
-    }
-
-    // Do initial merged load
+    // Do initial load
     const initialLogs = this.loadLogs(specDir);
     if (initialLogs) {
       this.logCache.set(specDir, initialLogs);
+      // Store initial entry count
+      const totalEntries = this.countTotalEntries(initialLogs);
+      this.lastLogCounts.set(specId, totalEntries);
     }
 
-    // Poll for changes in both locations
-    // Note: worktreeSpecDir may be null initially if worktree doesn't exist yet.
-    // We need to dynamically re-discover it during polling.
+    // Poll for changes in the database
     const pollInterval = setInterval(() => {
-      let mainChanged = false;
-      let worktreeChanged = false;
-
       // Dynamically re-discover worktree if not found yet
-      // This handles the case where user opens logs before worktree is created
       const watchedInfo = this.watchedPaths.get(specId);
       let currentWorktreeSpecDir = watchedInfo?.worktreeSpecDir || null;
 
-      if (!currentWorktreeSpecDir && projectPath && specsRelPath) {
-        const discoveredWorktree = findWorktreeSpecDir(projectPath, specId, specsRelPath);
+      if (!currentWorktreeSpecDir && resolvedProjectPath && specsRelPath) {
+        const discoveredWorktree = findWorktreeSpecDir(resolvedProjectPath, specId, specsRelPath);
         if (discoveredWorktree) {
           currentWorktreeSpecDir = discoveredWorktree;
           // Update stored paths so future iterations don't need to re-discover
           this.watchedPaths.set(specId, {
             mainSpecDir: specDir,
             worktreeSpecDir: discoveredWorktree,
-            specsRelPath: specsRelPath
+            specsRelPath: specsRelPath,
+            projectPath: resolvedProjectPath
           });
           console.warn(`[TaskLogService] Discovered worktree for ${specId}: ${discoveredWorktree}`);
         }
       }
 
-      // Check main spec dir
-      if (existsSync(mainLogFile)) {
-        try {
-          const currentContent = readFileSync(mainLogFile, 'utf-8');
-          if (currentContent !== lastMainContent) {
-            lastMainContent = currentContent;
-            mainChanged = true;
-          }
-        } catch (_error) {
-          // Ignore read/parse errors
-        }
-      }
+      // Load current logs from database
+      const previousLogs = this.logCache.get(specDir);
+      const previousCount = this.lastLogCounts.get(specId) || 0;
 
-      // Check worktree spec dir
-      if (currentWorktreeSpecDir) {
-        const worktreeLogFile = path.join(currentWorktreeSpecDir, 'task_logs.json');
-        if (existsSync(worktreeLogFile)) {
-          try {
-            const currentContent = readFileSync(worktreeLogFile, 'utf-8');
-            if (currentContent !== lastWorktreeContent) {
-              lastWorktreeContent = currentContent;
-              worktreeChanged = true;
-            }
-          } catch (_error) {
-            // Ignore read/parse errors
-          }
-        }
-      }
+      const logs = this.loadLogs(specDir);
 
-      // If either file changed, reload and emit
-      if (mainChanged || worktreeChanged) {
-        const previousLogs = this.logCache.get(specDir);
-        const logs = this.loadLogs(specDir);
+      if (logs) {
+        const currentCount = this.countTotalEntries(logs);
 
-        if (logs) {
-          // Emit change event with the merged logs
+        // Check if logs changed
+        if (currentCount !== previousCount) {
+          this.lastLogCounts.set(specId, currentCount);
+
+          // Emit change event with the logs
           this.emit('logs-changed', specId, logs);
 
           // Calculate and emit streaming updates for new entries
@@ -307,11 +466,22 @@ export class TaskLogService extends EventEmitter {
     }, this.POLL_INTERVAL_MS);
 
     this.pollIntervals.set(specId, pollInterval);
-    console.warn(`[TaskLogService] Started watching ${specId} (main: ${specDir}${worktreeSpecDir ? `, worktree: ${worktreeSpecDir}` : ''})`);
+    console.warn(`[TaskLogService] Started watching ${specId} (project: ${resolvedProjectPath}${worktreeSpecDir ? `, worktree: ${worktreeSpecDir}` : ''})`);
   }
 
   /**
-   * Stop watching a spec directory
+   * Count total entries across all phases.
+   */
+  private countTotalEntries(logs: TaskLogs): number {
+    return (
+      (logs.phases.planning?.entries?.length || 0) +
+      (logs.phases.coding?.entries?.length || 0) +
+      (logs.phases.validation?.entries?.length || 0)
+    );
+  }
+
+  /**
+   * Stop watching a spec directory.
    */
   stopWatching(specId: string): void {
     const interval = this.pollIntervals.get(specId);
@@ -319,12 +489,13 @@ export class TaskLogService extends EventEmitter {
       clearInterval(interval);
       this.pollIntervals.delete(specId);
       this.watchedPaths.delete(specId);
+      this.lastLogCounts.delete(specId);
       console.warn(`[TaskLogService] Stopped watching ${specId}`);
     }
   }
 
   /**
-   * Stop all watches
+   * Stop all watches.
    */
   stopAllWatching(): void {
     for (const specId of this.pollIntervals.keys()) {
@@ -333,7 +504,7 @@ export class TaskLogService extends EventEmitter {
   }
 
   /**
-   * Emit streaming updates for new log entries
+   * Emit streaming updates for new log entries.
    */
   private emitNewEntries(specId: string, previousLogs: TaskLogs | undefined, currentLogs: TaskLogs): void {
     const phases: TaskLogPhase[] = ['planning', 'coding', 'validation'];
@@ -392,25 +563,40 @@ export class TaskLogService extends EventEmitter {
   }
 
   /**
-   * Get cached logs without re-reading from disk
+   * Get cached logs without re-reading from database.
    */
   getCachedLogs(specDir: string): TaskLogs | null {
     return this.logCache.get(specDir) || null;
   }
 
   /**
-   * Clear the log cache for a spec
+   * Clear the log cache for a spec.
    */
   clearCache(specDir: string): void {
     this.logCache.delete(specDir);
   }
 
   /**
-   * Check if logs exist for a spec
+   * Check if logs exist for a spec (always true if task exists in database).
    */
   hasLogs(specDir: string): boolean {
-    const logFile = path.join(specDir, 'task_logs.json');
-    return existsSync(logFile);
+    const specId = extractSpecId(specDir);
+    const projectPath = detectProjectDir(specDir);
+
+    if (!projectPath) {
+      return false;
+    }
+
+    try {
+      const dbManager = getProjectDatabaseManager();
+      const conn = dbManager.getConnection(projectPath);
+      const db = conn.getConnection();
+
+      const row = db.prepare('SELECT id FROM tasks WHERE spec_id = ?').get(specId) as { id: string } | undefined;
+      return !!row;
+    } catch {
+      return false;
+    }
   }
 }
 
