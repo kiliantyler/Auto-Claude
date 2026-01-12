@@ -32,6 +32,7 @@ import { setupIpcHandlers as setupModularHandlers } from './ipc-handlers';
  * - ideation-handlers.ts: Ideation generation
  * - changelog-handlers.ts: Changelog operations
  * - insights-handlers.ts: AI insights chat
+ * - migration-handlers.ts: JSON-to-SQLite migration operations
  *
  * @param agentManager - The agent manager instance
  * @param terminalManager - The terminal manager instance

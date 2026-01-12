@@ -62,6 +62,7 @@ import { useUndoStore, performUndo, performRedo } from './stores/undo-store';
 import { initializeGitHubListeners } from './stores/github';
 import { initDownloadProgressListener } from './stores/download-store';
 import { GlobalDownloadIndicator } from './components/GlobalDownloadIndicator';
+import { MigrationProgress } from './components/MigrationProgress';
 import { useIpcListeners } from './hooks/useIpc';
 import { COLOR_THEMES, UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_DEFAULT } from '../shared/constants';
 import type { Task, Project, ColorTheme, SearchResult } from '../shared/types';
@@ -1142,6 +1143,9 @@ export function App() {
 
         {/* Global Download Indicator - shows Ollama model download progress */}
         <GlobalDownloadIndicator />
+
+        {/* Migration Progress - shows JSON-to-SQLite migration progress */}
+        <MigrationProgress />
 
         {/* Toast notifications */}
         <Toaster />

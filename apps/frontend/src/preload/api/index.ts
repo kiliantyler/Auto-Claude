@@ -17,6 +17,7 @@ import { HistoryAPI, createHistoryAPI } from './modules/history-api';
 import { SearchAPI, createSearchAPI } from './modules/search-api';
 import { UndoAPI, createUndoAPI } from './modules/undo-api';
 import { AnalyticsAPI, createAnalyticsAPI } from './modules/analytics-api';
+import { MigrationAPI, createMigrationAPI } from './migration-api';
 
 export interface ElectronAPI extends
   ProjectAPI,
@@ -36,7 +37,8 @@ export interface ElectronAPI extends
   HistoryAPI,
   SearchAPI,
   UndoAPI,
-  AnalyticsAPI {
+  AnalyticsAPI,
+  MigrationAPI {
   github: GitHubAPI;
 }
 
@@ -59,6 +61,7 @@ export const createElectronAPI = (): ElectronAPI => ({
   ...createSearchAPI(),
   ...createUndoAPI(),
   ...createAnalyticsAPI(),
+  ...createMigrationAPI(),
   github: createGitHubAPI()
 });
 
@@ -82,7 +85,8 @@ export {
   createHistoryAPI,
   createSearchAPI,
   createUndoAPI,
-  createAnalyticsAPI
+  createAnalyticsAPI,
+  createMigrationAPI
 };
 
 export type {
@@ -104,5 +108,6 @@ export type {
   HistoryAPI,
   SearchAPI,
   UndoAPI,
-  AnalyticsAPI
+  AnalyticsAPI,
+  MigrationAPI
 };

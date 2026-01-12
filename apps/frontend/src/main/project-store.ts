@@ -1,4 +1,4 @@
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, Dirent } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -7,6 +7,8 @@ import { DEFAULT_PROJECT_SETTINGS, AUTO_BUILD_PATHS, getSpecsDir } from '../shar
 import { getAutoBuildPath, isInitialized } from './project-initializer';
 import { getTaskWorktreeDir } from './worktree-paths';
 import { getDatabaseConnection } from './database';
+import { getMigrationTracker } from './migration-tracker';
+import { getMigrationWorker } from './migration-worker';
 
 interface TabState {
   openProjectIds: string[];
@@ -155,6 +157,53 @@ export class ProjectStore {
     } catch (error) {
       console.error('[ProjectStore] Failed to read projects from database:', error);
       return [];
+    }
+  }
+
+  /**
+   * Detect and trigger migration for a project if needed
+   * Checks if JSON files exist and migration hasn't been completed yet
+   *
+   * @param project - Project to check for migration
+   */
+  private async detectAndMigrateIfNeeded(project: Project): Promise<void> {
+    const tracker = getMigrationTracker();
+    const worker = getMigrationWorker();
+
+    // Check if already migrated
+    if (tracker.hasMigrated(project.path)) {
+      return;
+    }
+
+    // Check if JSON files exist in .auto-claude directory
+    const autoBuildDir = path.join(project.path, '.auto-claude');
+    if (!existsSync(autoBuildDir)) {
+      return;
+    }
+
+    const jsonFiles = ['tasks.json', 'implementation_plan.json', 'task_logs.json'];
+    const foundFiles = jsonFiles.filter(file => existsSync(path.join(autoBuildDir, file)));
+
+    if (foundFiles.length === 0) {
+      return;
+    }
+
+    // Trigger migration in background
+    console.log(`[ProjectStore] Starting migration for project: ${project.name} (found: ${foundFiles.join(', ')})`);
+
+    try {
+      await worker.migrate(project.path, (progress) => {
+        // Send progress to renderer via IPC if window exists
+        const mainWindow = BrowserWindow.getAllWindows()[0];
+        if (mainWindow) {
+          mainWindow.webContents.send('migration:progress', progress);
+        }
+      });
+
+      console.log(`[ProjectStore] Completed migration for project: ${project.name}`);
+    } catch (error) {
+      console.error(`[ProjectStore] Failed to migrate project ${project.name}:`, error);
+      // Don't throw - allow app to continue functioning
     }
   }
 
@@ -474,6 +523,14 @@ export class ProjectStore {
       console.warn('[ProjectStore] Project not found for id:', projectId);
       return [];
     }
+
+    // Trigger migration in background (non-blocking) when project is accessed
+    // This ensures migration runs when user loads a project, not just at startup
+    setImmediate(() => {
+      this.detectAndMigrateIfNeeded(project).catch((error) => {
+        console.error('[ProjectStore] Background migration failed for project:', project.name, error);
+      });
+    });
 
     let tasks: Task[] = [];
 
