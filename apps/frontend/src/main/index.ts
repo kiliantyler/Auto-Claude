@@ -39,6 +39,9 @@ import { preWarmToolCache } from './cli-tool-manager';
 import { initializeClaudeProfileManager } from './claude-profile-manager';
 import { getDatabaseConnection, closeDatabaseConnection } from './database';
 import { getDatabaseEventPoller, stopDatabaseEventPoller } from './database-event-poller';
+import { getMigrationTracker } from './migration-tracker';
+import { getMigrationWorker } from './migration-worker';
+import { projectStore } from './project-store';
 import type { AppSettings } from '../shared/types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +147,76 @@ function initializeDatabase(): void {
     console.error('[Database] Failed to initialize database:', error);
     throw error;
   }
+}
+
+/**
+ * Detect and trigger migrations for all known projects at startup.
+ *
+ * Scans all projects for JSON files (tasks.json, implementation_plan.json, task_logs.json).
+ * If files exist and no migration marker found, triggers migration in background.
+ *
+ * Migration progress events are sent to renderer via 'migration:progress' IPC channel.
+ */
+async function detectAndMigrateProjects(): Promise<void> {
+  console.log('[Migration] Detecting projects that need migration...');
+
+  const tracker = getMigrationTracker();
+  const worker = getMigrationWorker();
+  const projects = projectStore.getProjects();
+
+  if (projects.length === 0) {
+    console.log('[Migration] No projects found, skipping migration detection');
+    return;
+  }
+
+  console.log(`[Migration] Checking ${projects.length} project(s) for migration...`);
+
+  // Process each project sequentially to avoid database lock conflicts
+  for (const project of projects) {
+    try {
+      const projectPath = project.path;
+
+      // Check if already migrated
+      if (tracker.hasMigrated(projectPath)) {
+        console.log(`[Migration] Project already migrated: ${project.name}`);
+        continue;
+      }
+
+      // Check if JSON files exist
+      const autoBuildDir = join(projectPath, '.auto-claude');
+      if (!existsSync(autoBuildDir)) {
+        console.log(`[Migration] No .auto-claude directory found for project: ${project.name}`);
+        continue;
+      }
+
+      const jsonFiles = ['tasks.json', 'implementation_plan.json', 'task_logs.json'];
+      const foundFiles = jsonFiles.filter((file) =>
+        existsSync(join(autoBuildDir, file))
+      );
+
+      if (foundFiles.length === 0) {
+        console.log(`[Migration] No JSON files found for project: ${project.name}`);
+        continue;
+      }
+
+      // Trigger migration
+      console.log(`[Migration] Starting migration for project: ${project.name} (found: ${foundFiles.join(', ')})`);
+
+      await worker.migrate(projectPath, (progress) => {
+        // Send progress to renderer if window exists
+        if (mainWindow) {
+          mainWindow.webContents.send('migration:progress', progress);
+        }
+      });
+
+      console.log(`[Migration] Completed migration for project: ${project.name}`);
+    } catch (error) {
+      console.error(`[Migration] Failed to migrate project ${project.name}:`, error);
+      // Continue with next project even if one fails
+    }
+  }
+
+  console.log('[Migration] Migration detection completed');
 }
 
 // Get icon path based on platform
@@ -316,6 +389,15 @@ app.whenReady().then(() => {
   });
 
   console.log('[main] Database event poller started');
+
+  // Detect and migrate projects with JSON files to SQLite
+  // This runs in background and won't block window creation
+  // Migration progress updates are sent to renderer via IPC
+  setImmediate(() => {
+    detectAndMigrateProjects().catch((error) => {
+      console.error('[main] Failed to detect/migrate projects:', error);
+    });
+  });
 
   // Set dock icon on macOS
   if (process.platform === 'darwin') {
