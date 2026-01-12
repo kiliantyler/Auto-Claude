@@ -528,5 +528,14 @@ export const IPC_CHANNELS = {
   HISTORY_IS_ENABLED: 'history:is-enabled',                  // Check if history feature is enabled
   HISTORY_GET_RECENT_SESSIONS: 'history:get-recent-sessions', // Get list of recent sessions
   HISTORY_QUERY: 'history:query',                            // Query history with flexible filters
-  HISTORY_GET_TASK_HISTORY_COUNT: 'history:get-task-history-count' // Get count of history entries for a task
+  HISTORY_GET_TASK_HISTORY_COUNT: 'history:get-task-history-count', // Get count of history entries for a task
+
+  // Search operations (FTS5 full-text search)
+  SEARCH_QUERY: 'search:query',                    // Perform full-text search on tasks
+  SEARCH_SUGGESTIONS: 'search:suggestions',        // Get autocomplete suggestions
+  SEARCH_IS_ENABLED: 'search:is-enabled',          // Check if search feature is enabled
+  SEARCH_GET_RECENT: 'search:get-recent',          // Get recent search history
+  SEARCH_CLEAR_RECENT: 'search:clear-recent',      // Clear recent search history
+  SEARCH_REBUILD_INDEX: 'search:rebuild-index',    // Rebuild FTS5 index (maintenance)
+  SEARCH_VERIFY_FTS5: 'search:verify-fts5',        // Verify FTS5 is available in SQLite
 } as const;
