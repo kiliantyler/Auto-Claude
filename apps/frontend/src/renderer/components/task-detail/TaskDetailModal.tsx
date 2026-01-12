@@ -40,6 +40,7 @@ import { TaskWarnings } from './TaskWarnings';
 import { TaskSubtasks } from './TaskSubtasks';
 import { TaskLogs } from './TaskLogs';
 import { TaskFiles } from './TaskFiles';
+import { TaskHistory } from './TaskHistory';
 import { TaskReview } from './TaskReview';
 import type { Task } from '../../../shared/types';
 
@@ -74,12 +75,19 @@ const isFilesTabEnabled = () => {
   return flag === null || flag === 'true'; // Enabled by default
 };
 
+// Feature flag for History tab (enabled by default, can be disabled via localStorage)
+const isHistoryTabEnabled = () => {
+  const flag = localStorage.getItem('use_history_tab');
+  return flag === null || flag === 'true'; // Enabled by default
+};
+
 // Separate component to use hooks only when task exists
 function TaskDetailModalContent({ open, task, onOpenChange, onSwitchToTerminals, onOpenInbuiltTerminal }: { open: boolean; task: Task; onOpenChange: (open: boolean) => void; onSwitchToTerminals?: () => void; onOpenInbuiltTerminal?: (id: string, cwd: string) => void }) {
   const { t } = useTranslation(['tasks']);
   const { toast } = useToast();
   const state = useTaskDetail({ task });
   const showFilesTab = isFilesTabEnabled();
+  const showHistoryTab = isHistoryTabEnabled();
   const progressPercent = calculateProgress(task.subtasks);
   const completedSubtasks = task.subtasks.filter(s => s.status === 'completed').length;
   const totalSubtasks = task.subtasks.length;
@@ -398,6 +406,14 @@ function TaskDetailModalContent({ open, task, onOpenChange, onSwitchToTerminals,
                       {t('tasks:files.tab')}
                     </TabsTrigger>
                   )}
+                  {showHistoryTab && (
+                    <TabsTrigger
+                      value="history"
+                      className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5 text-sm"
+                    >
+                      {t('tasks:history.tab')}
+                    </TabsTrigger>
+                  )}
                 </TabsList>
 
                 {/* Overview Tab */}
@@ -473,6 +489,13 @@ function TaskDetailModalContent({ open, task, onOpenChange, onSwitchToTerminals,
                 {showFilesTab && (
                   <TabsContent value="files" className="flex-1 min-h-0 overflow-hidden mt-0">
                     <TaskFiles task={task} />
+                  </TabsContent>
+                )}
+
+                {/* History Tab */}
+                {showHistoryTab && (
+                  <TabsContent value="history" className="flex-1 min-h-0 overflow-hidden mt-0">
+                    <TaskHistory task={task} />
                   </TabsContent>
                 )}
               </Tabs>

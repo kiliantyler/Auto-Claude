@@ -44,6 +44,7 @@ import { GitLabMergeRequests } from './components/gitlab-merge-requests';
 import { Changelog } from './components/Changelog';
 import { Worktrees } from './components/Worktrees';
 import { AgentTools } from './components/AgentTools';
+import { Analytics } from './components/analytics/Analytics';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { RateLimitModal } from './components/RateLimitModal';
 import { SDKRateLimitModal } from './components/SDKRateLimitModal';
@@ -51,20 +52,23 @@ import { OnboardingWizard } from './components/onboarding';
 import { AppUpdateNotification } from './components/AppUpdateNotification';
 import { ProactiveSwapListener } from './components/ProactiveSwapListener';
 import { GitHubSetupModal } from './components/GitHubSetupModal';
+import { GlobalSearch } from './components/search/GlobalSearch';
 import { useProjectStore, loadProjects, addProject, initializeProject, removeProject } from './stores/project-store';
 import { useTaskStore, loadTasks } from './stores/task-store';
 import { useSettingsStore, loadSettings, loadProfiles } from './stores/settings-store';
 import { useClaudeProfileStore } from './stores/claude-profile-store';
 import { useTerminalStore, restoreTerminalSessions } from './stores/terminal-store';
+import { useUndoStore, performUndo, performRedo } from './stores/undo-store';
 import { initializeGitHubListeners } from './stores/github';
 import { initDownloadProgressListener } from './stores/download-store';
 import { GlobalDownloadIndicator } from './components/GlobalDownloadIndicator';
 import { useIpcListeners } from './hooks/useIpc';
 import { COLOR_THEMES, UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_DEFAULT } from '../shared/constants';
-import type { Task, Project, ColorTheme } from '../shared/types';
+import type { Task, Project, ColorTheme, SearchResult } from '../shared/types';
 import { ProjectTabBar } from './components/ProjectTabBar';
 import { AddProjectModal } from './components/AddProjectModal';
 import { ViewStateProvider } from './contexts/ViewStateContext';
+import { UndoRedoButtons } from './components/undo/UndoRedoButtons';
 
 // Wrapper component for ProjectTabBar
 interface ProjectTabBarWithContextProps {
@@ -120,6 +124,11 @@ export function App() {
   // Claude Profile state (OAuth)
   const claudeProfiles = useClaudeProfileStore((state) => state.profiles);
 
+  // Undo/Redo state
+  const canUndo = useUndoStore((state) => state.canUndo);
+  const canRedo = useUndoStore((state) => state.canRedo);
+  const isUndoProcessing = useUndoStore((state) => state.isProcessing);
+
   // UI State
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [isNewTaskDialogOpen, setIsNewTaskDialogOpen] = useState(false);
@@ -129,6 +138,7 @@ export function App() {
   const [activeView, setActiveView] = useState<SidebarView>('kanban');
   const [isOnboardingWizardOpen, setIsOnboardingWizardOpen] = useState(false);
   const [isRefreshingTasks, setIsRefreshingTasks] = useState(false);
+  const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
 
   // Initialize dialog state
   const [showInitDialog, setShowInitDialog] = useState(false);
@@ -321,7 +331,7 @@ export function App() {
     }
   }, [selectedProject, skippedInitProjectId, isInitializing, initSuccess]);
 
-  // Global keyboard shortcut: Cmd/Ctrl+T to add project (when not on terminals view)
+  // Global keyboard shortcuts: Cmd/Ctrl+T to add project, Cmd/Ctrl+K to open search, Cmd/Ctrl+Z to undo, Cmd/Ctrl+Shift+Z to redo
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
       // Skip if in input fields
@@ -330,6 +340,31 @@ export function App() {
         e.target instanceof HTMLTextAreaElement ||
         (e.target as HTMLElement)?.isContentEditable
       ) {
+        return;
+      }
+
+      // Cmd/Ctrl+K: Open global search
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        setIsGlobalSearchOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl+Shift+Z: Redo (check before undo since it also uses Z)
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (canRedo && !isUndoProcessing) {
+          performRedo();
+        }
+        return;
+      }
+
+      // Cmd/Ctrl+Z: Undo
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (canUndo && !isUndoProcessing) {
+          performUndo();
+        }
         return;
       }
 
@@ -358,7 +393,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeView, openProjectTab]);
+  }, [activeView, openProjectTab, canUndo, canRedo, isUndoProcessing]);
 
   // Load tasks when project changes
   useEffect(() => {
@@ -753,6 +788,11 @@ export function App() {
     }
   };
 
+  const handleSearchResultSelect = (result: SearchResult) => {
+    // Navigate to the task from search result
+    handleGoToTask(result.id);
+  };
+
   return (
     <ViewStateProvider>
       <TooltipProvider>
@@ -799,6 +839,13 @@ export function App() {
                 )}
               </DragOverlay>
             </DndContext>
+          )}
+
+          {/* Toolbar with undo/redo buttons */}
+          {selectedProject && (
+            <div className="flex items-center justify-end px-2 py-1 border-b border-border bg-background/95">
+              <UndoRedoButtons compact />
+            </div>
           )}
 
           {/* Main content area */}
@@ -880,6 +927,9 @@ export function App() {
                   <Worktrees projectId={activeProjectId || selectedProjectId!} />
                 )}
                 {activeView === 'agent-tools' && <AgentTools />}
+                {activeView === 'analytics' && (activeProjectId || selectedProjectId) && (
+                  <Analytics projectId={activeProjectId || selectedProjectId!} />
+                )}
               </>
             ) : (
               <WelcomeScreen
@@ -901,6 +951,14 @@ export function App() {
           onOpenChange={(open) => !open && handleCloseTaskDetail()}
           onSwitchToTerminals={() => setActiveView('terminals')}
           onOpenInbuiltTerminal={handleOpenInbuiltTerminal}
+        />
+
+        {/* Global Search Modal (Cmd/Ctrl+K) */}
+        <GlobalSearch
+          open={isGlobalSearchOpen}
+          onOpenChange={setIsGlobalSearchOpen}
+          onResultSelect={handleSearchResultSelect}
+          projectId={activeProjectId || selectedProjectId || undefined}
         />
 
         {/* Dialogs */}

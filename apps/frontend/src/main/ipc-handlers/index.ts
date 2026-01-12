@@ -33,6 +33,10 @@ import { registerClaudeCodeHandlers } from './claude-code-handlers';
 import { registerMcpHandlers } from './mcp-handlers';
 import { registerProfileHandlers } from './profile-handlers';
 import { registerTerminalWorktreeIpcHandlers } from './terminal';
+import { registerHistoryHandlers } from './history-handlers';
+import { registerSearchHandlers } from './search-handlers';
+import { registerUndoHandlers } from './undo-handlers';
+import { registerAnalyticsHandlers } from './analytics-handlers';
 import { notificationService } from '../notification-service';
 
 /**
@@ -118,6 +122,18 @@ export function setupIpcHandlers(
   // API Profile handlers (custom Anthropic-compatible endpoints)
   registerProfileHandlers();
 
+  // History/audit log handlers (task change tracking)
+  registerHistoryHandlers();
+
+  // Search handlers (full-text search using FTS5)
+  registerSearchHandlers();
+
+  // Undo/Redo handlers (task operation undo/redo)
+  registerUndoHandlers();
+
+  // Analytics handlers (task metrics and reporting)
+  registerAnalyticsHandlers();
+
   console.warn('[IPC] All handler modules registered successfully');
 }
 
@@ -144,5 +160,9 @@ export {
   registerDebugHandlers,
   registerClaudeCodeHandlers,
   registerMcpHandlers,
-  registerProfileHandlers
+  registerProfileHandlers,
+  registerHistoryHandlers,
+  registerSearchHandlers,
+  registerUndoHandlers,
+  registerAnalyticsHandlers
 };

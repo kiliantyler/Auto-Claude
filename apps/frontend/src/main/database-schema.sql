@@ -9,8 +9,14 @@
 -- Key Features:
 -- - Tasks, projects, and metadata tables
 -- - Event queue for IPC notification system
+-- - Task history table for audit logging (Phase 4A)
+-- - FTS5 virtual table for full-text search (Phase 4B)
+-- - Undo stack table for undo/redo operations (Phase 4C)
+-- - Task metrics table for analytics and reporting (Phase 4D)
 -- - Indexes for query optimization (<100ms latency)
 -- - Triggers for automatic event emission on data changes
+-- - Triggers for automatic task history recording
+-- - Triggers for FTS5 index synchronization
 -- - Foreign key constraints for data integrity
 --
 -- Database: tasks.db
@@ -80,6 +86,64 @@ CREATE TABLE IF NOT EXISTS event_queue (
   timestamp TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Task History Table (Phase 4A)
+-- Stores audit log of all task changes for history tracking
+CREATE TABLE IF NOT EXISTS task_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  action TEXT NOT NULL,  -- 'created' | 'updated' | 'deleted' | 'status_changed' | 'moved'
+  field_name TEXT,
+  old_value TEXT,
+  new_value TEXT,
+  changed_by TEXT,
+  timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+  session_id TEXT,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+-- Undo Stack Table (Phase 4C)
+-- Stores undo/redo operation stack per session for reversible actions
+CREATE TABLE IF NOT EXISTS undo_stack (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  operation TEXT NOT NULL,  -- JSON serialized operation (action type + data)
+  inverse_operation TEXT NOT NULL,  -- JSON serialized inverse operation for undo
+  timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+  description TEXT  -- Human-readable description of the operation
+);
+
+-- Task Metrics Table (Phase 4D)
+-- Stores daily aggregated metrics for analytics and reporting
+CREATE TABLE IF NOT EXISTS task_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  metric_date TEXT NOT NULL,  -- Date in ISO format (YYYY-MM-DD)
+  total_tasks INTEGER,
+  completed_tasks INTEGER,
+  in_progress_tasks INTEGER,
+  blocked_tasks INTEGER,
+  avg_completion_time_hours REAL,
+  created_count INTEGER,  -- Tasks created on this date
+  completed_count INTEGER,  -- Tasks completed on this date
+  UNIQUE(project_id, metric_date)
+);
+
+-- ============================================
+-- Full-Text Search (Phase 4B)
+-- ============================================
+
+-- FTS5 Virtual Table for Task Search
+-- Indexes task title, description, and tags for full-text search
+-- NOTE: FTS5 tables do NOT support constraints, data types, or PRIMARY KEY
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+  title,
+  description,
+  tags,
+  content='tasks',
+  content_rowid='rowid'
+);
+
 -- ============================================
 -- Indexes for Query Optimization
 -- ============================================
@@ -99,6 +163,18 @@ CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at DESC);
 -- Event queue indexes
 CREATE INDEX IF NOT EXISTS idx_event_queue_timestamp ON event_queue(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_event_queue_entity ON event_queue(entity_type, entity_id);
+
+-- Task history indexes
+CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_history_timestamp ON task_history(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_task_history_session ON task_history(session_id);
+
+-- Undo stack indexes
+CREATE INDEX IF NOT EXISTS idx_undo_stack_session ON undo_stack(session_id, sequence);
+
+-- Task metrics indexes
+CREATE INDEX IF NOT EXISTS idx_task_metrics_date ON task_metrics(metric_date);
+CREATE INDEX IF NOT EXISTS idx_task_metrics_project ON task_metrics(project_id);
 
 -- ============================================
 -- Triggers for Event System
@@ -165,10 +241,122 @@ BEGIN
 END;
 
 -- ============================================
+-- Triggers for Task History (Phase 4A)
+-- ============================================
+
+-- Task History INSERT trigger
+-- Records 'created' action when a new task is inserted
+CREATE TRIGGER IF NOT EXISTS task_history_on_insert
+AFTER INSERT ON tasks
+BEGIN
+  INSERT INTO task_history (task_id, action, new_value, changed_by, session_id)
+  VALUES (
+    NEW.id,
+    'created',
+    json_object('title', NEW.title, 'status', NEW.status, 'description', NEW.description),
+    'user',
+    NULL
+  );
+END;
+
+-- Task History UPDATE trigger
+-- Records 'updated' or 'status_changed' action when a task is updated
+CREATE TRIGGER IF NOT EXISTS task_history_on_update
+AFTER UPDATE ON tasks
+BEGIN
+  INSERT INTO task_history (task_id, action, field_name, old_value, new_value, changed_by, session_id)
+  VALUES (
+    NEW.id,
+    CASE WHEN OLD.status != NEW.status THEN 'status_changed' ELSE 'updated' END,
+    CASE
+      WHEN OLD.status != NEW.status THEN 'status'
+      WHEN OLD.title != NEW.title THEN 'title'
+      ELSE NULL
+    END,
+    json_object('title', OLD.title, 'status', OLD.status, 'description', OLD.description),
+    json_object('title', NEW.title, 'status', NEW.status, 'description', NEW.description),
+    'user',
+    NULL
+  );
+END;
+
+-- Task History DELETE trigger
+-- Records 'deleted' action when a task is deleted
+CREATE TRIGGER IF NOT EXISTS task_history_on_delete
+AFTER DELETE ON tasks
+BEGIN
+  INSERT INTO task_history (task_id, action, old_value, changed_by, session_id)
+  VALUES (
+    OLD.id,
+    'deleted',
+    json_object('title', OLD.title, 'status', OLD.status, 'description', OLD.description),
+    'user',
+    NULL
+  );
+END;
+
+-- ============================================
+-- Triggers for FTS5 Sync (Phase 4B)
+-- ============================================
+
+-- FTS5 INSERT trigger
+-- Syncs FTS index when a new task is inserted
+CREATE TRIGGER IF NOT EXISTS tasks_fts_insert
+AFTER INSERT ON tasks
+BEGIN
+  INSERT INTO tasks_fts(rowid, title, description, tags)
+  VALUES (
+    NEW.rowid,
+    NEW.title,
+    NEW.description,
+    json_extract(NEW.metadata_json, '$.tags')
+  );
+END;
+
+-- FTS5 UPDATE trigger
+-- Syncs FTS index when a task is updated
+-- NOTE: FTS5 does NOT support UPDATE, so we delete old entry and insert new one
+CREATE TRIGGER IF NOT EXISTS tasks_fts_update
+AFTER UPDATE ON tasks
+BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
+  VALUES (
+    'delete',
+    OLD.rowid,
+    OLD.title,
+    OLD.description,
+    json_extract(OLD.metadata_json, '$.tags')
+  );
+  INSERT INTO tasks_fts(rowid, title, description, tags)
+  VALUES (
+    NEW.rowid,
+    NEW.title,
+    NEW.description,
+    json_extract(NEW.metadata_json, '$.tags')
+  );
+END;
+
+-- FTS5 DELETE trigger
+-- Removes task from FTS index when task is deleted
+-- NOTE: Uses special 'delete' command for contentless FTS5 tables
+CREATE TRIGGER IF NOT EXISTS tasks_fts_delete
+AFTER DELETE ON tasks
+BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
+  VALUES (
+    'delete',
+    OLD.rowid,
+    OLD.title,
+    OLD.description,
+    json_extract(OLD.metadata_json, '$.tags')
+  );
+END;
+
+-- ============================================
 -- Initial Data
 -- ============================================
 
 -- Schema version metadata
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '001');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '003');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('last_migration', datetime('now'));

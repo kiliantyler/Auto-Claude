@@ -519,5 +519,44 @@ export const IPC_CHANNELS = {
   // Sentry error reporting
   SENTRY_STATE_CHANGED: 'sentry:state-changed',  // Notify main process when setting changes
   GET_SENTRY_DSN: 'sentry:get-dsn',              // Get DSN from main process (env var)
-  GET_SENTRY_CONFIG: 'sentry:get-config'         // Get full Sentry config (DSN + sample rates)
+  GET_SENTRY_CONFIG: 'sentry:get-config',        // Get full Sentry config (DSN + sample rates)
+
+  // History operations (task audit logging)
+  HISTORY_GET_TASK_HISTORY: 'history:get-task-history',      // Get full history for a specific task
+  HISTORY_GET_RECENT: 'history:get-recent',                  // Get recent changes across all tasks
+  HISTORY_GET_SESSION: 'history:get-session',                // Get all changes for a specific session
+  HISTORY_IS_ENABLED: 'history:is-enabled',                  // Check if history feature is enabled
+  HISTORY_GET_RECENT_SESSIONS: 'history:get-recent-sessions', // Get list of recent sessions
+  HISTORY_QUERY: 'history:query',                            // Query history with flexible filters
+  HISTORY_GET_TASK_HISTORY_COUNT: 'history:get-task-history-count', // Get count of history entries for a task
+
+  // Search operations (FTS5 full-text search)
+  SEARCH_QUERY: 'search:query',                    // Perform full-text search on tasks
+  SEARCH_SUGGESTIONS: 'search:suggestions',        // Get autocomplete suggestions
+  SEARCH_IS_ENABLED: 'search:is-enabled',          // Check if search feature is enabled
+  SEARCH_GET_RECENT: 'search:get-recent',          // Get recent search history
+  SEARCH_CLEAR_RECENT: 'search:clear-recent',      // Clear recent search history
+  SEARCH_REBUILD_INDEX: 'search:rebuild-index',    // Rebuild FTS5 index (maintenance)
+  SEARCH_VERIFY_FTS5: 'search:verify-fts5',        // Verify FTS5 is available in SQLite
+
+  // Undo/Redo operations (task change history)
+  UNDO_UNDO: 'undo:undo',                          // Undo the last task change
+  UNDO_REDO: 'undo:redo',                          // Redo a previously undone change
+  UNDO_CAN_UNDO: 'undo:can-undo',                  // Check if undo is available
+  UNDO_CAN_REDO: 'undo:can-redo',                  // Check if redo is available
+  UNDO_GET_HISTORY: 'undo:get-history',            // Get undo/redo stack history
+  UNDO_CLEAR_HISTORY: 'undo:clear-history',        // Clear undo/redo history
+  UNDO_IS_ENABLED: 'undo:is-enabled',              // Check if undo feature is enabled
+
+  // Undo/Redo events (main -> renderer)
+  UNDO_STATE_CHANGED: 'undo:state-changed',        // Event: undo/redo state changed
+
+  // Analytics operations (task metrics and insights)
+  ANALYTICS_GET_TASK_METRICS: 'analytics:get-task-metrics',             // Get metrics for a specific task
+  ANALYTICS_GET_PROJECT_METRICS: 'analytics:get-project-metrics',       // Get aggregated metrics for a project
+  ANALYTICS_GET_PRODUCTIVITY_STATS: 'analytics:get-productivity-stats', // Get productivity statistics
+  ANALYTICS_GET_COMPLETION_TRENDS: 'analytics:get-completion-trends',   // Get task completion trends over time
+  ANALYTICS_GET_STATUS_DISTRIBUTION: 'analytics:get-status-distribution', // Get distribution of task statuses
+  ANALYTICS_IS_ENABLED: 'analytics:is-enabled',                         // Check if analytics feature is enabled
+  ANALYTICS_REFRESH: 'analytics:refresh',                               // Refresh cached analytics data
 } as const;
