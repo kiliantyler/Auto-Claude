@@ -339,16 +339,18 @@ CREATE TABLE IF NOT EXISTS timeline_task_views (
 -- Insight Sessions Tables
 -- ============================================
 
--- Insight sessions
+-- Insight sessions (AI-powered codebase insights chat)
+-- Replaces .auto-claude/insights/sessions/*.json files
 CREATE TABLE IF NOT EXISTS insight_sessions (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,  -- Reference to project (not a foreign key)
   title TEXT,
+  model_config_json TEXT,  -- JSON: {model, thinkingLevel} - per-session model configuration
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Session messages
+-- Session messages (chat messages within insight sessions)
 CREATE TABLE IF NOT EXISTS session_messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -356,6 +358,16 @@ CREATE TABLE IF NOT EXISTS session_messages (
   content TEXT NOT NULL,
   timestamp TEXT NOT NULL,
   tools_used_json TEXT,  -- JSON array of {name, input, timestamp}
+  suggested_task_json TEXT,  -- JSON: {title, description, rationale} - for assistant messages
+  FOREIGN KEY (session_id) REFERENCES insight_sessions(id) ON DELETE CASCADE
+);
+
+-- Current insight session pointer (tracks which session is active per project)
+-- Replaces .auto-claude/insights/current_session.json files
+CREATE TABLE IF NOT EXISTS current_insight_session (
+  project_id TEXT PRIMARY KEY,  -- Reference to project (not a foreign key)
+  session_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (session_id) REFERENCES insight_sessions(id) ON DELETE CASCADE
 );
 
@@ -477,8 +489,10 @@ CREATE INDEX IF NOT EXISTS idx_timeline_task_views_status ON timeline_task_views
 
 -- Insight sessions indexes
 CREATE INDEX IF NOT EXISTS idx_insight_sessions_project ON insight_sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_insight_sessions_updated ON insight_sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp ON session_messages(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_current_insight_session_session ON current_insight_session(session_id);
 
 -- Migration status indexes
 CREATE INDEX IF NOT EXISTS idx_migration_status_type ON migration_status(data_type);
@@ -669,7 +683,7 @@ END;
 -- ============================================
 
 -- Schema version metadata
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '007');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '008');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_type', 'project-local');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('last_migration', datetime('now'));

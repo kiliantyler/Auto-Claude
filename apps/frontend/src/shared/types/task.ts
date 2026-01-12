@@ -426,6 +426,19 @@ export interface WorktreeListResult {
   worktrees: WorktreeListItem[];
 }
 
+/**
+ * Information about whether a task has data that can be reset
+ * Used to show reset button for stopped tasks that have associated artifacts
+ */
+export interface TaskResetDataInfo {
+  hasResetData: boolean;
+  hasWorktree: boolean;
+  hasLogs: boolean;
+  hasImplementationPlan: boolean;
+  hasQaReport: boolean;
+  hasMemoryDir: boolean;
+}
+
 // Stuck task recovery types
 export interface StuckTaskInfo {
   taskId: string;

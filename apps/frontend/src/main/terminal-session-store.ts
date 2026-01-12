@@ -1,7 +1,6 @@
-import { app } from 'electron';
-import { join } from 'path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import type { TerminalWorktreeConfig } from '../shared/types';
+import { getGlobalDatabase } from './database';
 
 /**
  * Persisted terminal session data
@@ -30,16 +29,6 @@ export interface SessionDateInfo {
   projectCount: number;  // Number of projects with sessions
 }
 
-/**
- * All persisted sessions grouped by date, then by project
- */
-interface SessionData {
-  version: number;
-  // date (YYYY-MM-DD) -> projectPath -> sessions
-  sessionsByDate: Record<string, Record<string, TerminalSession[]>>;
-}
-
-const STORE_VERSION = 2;  // Bumped for new structure
 const MAX_OUTPUT_BUFFER = 100000;  // 100KB per terminal
 const MAX_DAYS_TO_KEEP = 10;  // Keep sessions for 10 days
 
@@ -69,141 +58,87 @@ function getDateLabel(dateStr: string): string {
 }
 
 /**
- * Manages persistent terminal session storage organized by date
- * Sessions are saved to userData/sessions/terminals.json
+ * Database row type for terminal_sessions
+ */
+interface TerminalSessionRow {
+  id: number;
+  session_id: string;
+  project_path: string;
+  title: string;
+  cwd: string;
+  is_claude_mode: number;
+  claude_session_id: string | null;
+  output_buffer: string | null;
+  worktree_config_json: string | null;
+  session_date: string;
+  created_at: string;
+  last_active_at: string;
+}
+
+/**
+ * Manages persistent terminal session storage using SQLite.
+ * Sessions are stored in the global database (app.db).
  */
 export class TerminalSessionStore {
-  private storePath: string;
-  private data: SessionData;
-
   constructor() {
-    const sessionsDir = join(app.getPath('userData'), 'sessions');
-    this.storePath = join(sessionsDir, 'terminals.json');
-
-    // Ensure directory exists
-    if (!existsSync(sessionsDir)) {
-      mkdirSync(sessionsDir, { recursive: true });
-    }
-
-    // Load existing data or initialize
-    this.data = this.load();
-
     // Clean up old sessions on startup
     this.cleanupOldSessions();
   }
 
   /**
-   * Load sessions from disk
+   * Get the database connection
    */
-  private load(): SessionData {
-    try {
-      if (existsSync(this.storePath)) {
-        const content = readFileSync(this.storePath, 'utf-8');
-        const data = JSON.parse(content);
-
-        // Migrate from v1 to v2 structure
-        if (data.version === 1 && data.sessions) {
-          console.warn('[TerminalSessionStore] Migrating from v1 to v2 structure');
-          const today = getDateString();
-          const migratedData: SessionData = {
-            version: STORE_VERSION,
-            sessionsByDate: {
-              [today]: data.sessions
-            }
-          };
-          return migratedData;
-        }
-
-        if (data.version === STORE_VERSION) {
-          return data as SessionData;
-        }
-
-        console.warn('[TerminalSessionStore] Version mismatch, resetting sessions');
-        return { version: STORE_VERSION, sessionsByDate: {} };
-      }
-    } catch (error) {
-      console.error('[TerminalSessionStore] Error loading sessions:', error);
-    }
-
-    return { version: STORE_VERSION, sessionsByDate: {} };
-  }
-
-  /**
-   * Save sessions to disk
-   */
-  private save(): void {
-    try {
-      writeFileSync(this.storePath, JSON.stringify(this.data, null, 2));
-    } catch (error) {
-      console.error('[TerminalSessionStore] Error saving sessions:', error);
-    }
+  private getDb() {
+    return getGlobalDatabase().getConnection();
   }
 
   /**
    * Remove sessions older than MAX_DAYS_TO_KEEP days
    */
   private cleanupOldSessions(): void {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - MAX_DAYS_TO_KEEP);
-    const cutoffStr = getDateString(cutoffDate);
+    try {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - MAX_DAYS_TO_KEEP);
+      const cutoffStr = getDateString(cutoffDate);
 
-    let removedCount = 0;
-    const dates = Object.keys(this.data.sessionsByDate);
+      const db = this.getDb();
+      const result = db.prepare(`
+        DELETE FROM terminal_sessions WHERE session_date < ?
+      `).run(cutoffStr);
 
-    for (const dateStr of dates) {
-      if (dateStr < cutoffStr) {
-        delete this.data.sessionsByDate[dateStr];
-        removedCount++;
+      if (result.changes > 0) {
+        console.warn(`[TerminalSessionStore] Cleaned up ${result.changes} old sessions`);
+      }
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error cleaning up old sessions:', error);
+    }
+  }
+
+  /**
+   * Convert database row to TerminalSession object
+   */
+  private rowToSession(row: TerminalSessionRow): TerminalSession {
+    let worktreeConfig: TerminalWorktreeConfig | undefined;
+    if (row.worktree_config_json) {
+      try {
+        worktreeConfig = JSON.parse(row.worktree_config_json);
+      } catch {
+        // Invalid JSON - ignore
       }
     }
 
-    if (removedCount > 0) {
-      console.warn(`[TerminalSessionStore] Cleaned up sessions from ${removedCount} old dates`);
-      this.save();
-    }
-  }
-
-  /**
-   * Get sessions for today, organized by project
-   */
-  private getTodaysSessions(): Record<string, TerminalSession[]> {
-    const today = getDateString();
-    if (!this.data.sessionsByDate[today]) {
-      this.data.sessionsByDate[today] = {};
-    }
-    return this.data.sessionsByDate[today];
-  }
-
-  /**
-   * Save a terminal session (to today's bucket)
-   */
-  saveSession(session: TerminalSession): void {
-    const { projectPath } = session;
-    const todaySessions = this.getTodaysSessions();
-
-    if (!todaySessions[projectPath]) {
-      todaySessions[projectPath] = [];
-    }
-
-    // Update existing or add new
-    const existingIndex = todaySessions[projectPath].findIndex(s => s.id === session.id);
-    if (existingIndex >= 0) {
-      todaySessions[projectPath][existingIndex] = {
-        ...session,
-        // Limit output buffer size
-        outputBuffer: session.outputBuffer.slice(-MAX_OUTPUT_BUFFER),
-        lastActiveAt: new Date().toISOString()
-      };
-    } else {
-      todaySessions[projectPath].push({
-        ...session,
-        outputBuffer: session.outputBuffer.slice(-MAX_OUTPUT_BUFFER),
-        createdAt: new Date().toISOString(),
-        lastActiveAt: new Date().toISOString()
-      });
-    }
-
-    this.save();
+    return {
+      id: row.session_id,
+      title: row.title,
+      cwd: row.cwd,
+      projectPath: row.project_path,
+      isClaudeMode: row.is_claude_mode === 1,
+      claudeSessionId: row.claude_session_id || undefined,
+      outputBuffer: row.output_buffer || '',
+      createdAt: row.created_at,
+      lastActiveAt: row.last_active_at,
+      worktreeConfig: this.validateWorktreeConfig(worktreeConfig),
+    };
   }
 
   /**
@@ -223,149 +158,234 @@ export class TerminalSessionStore {
   }
 
   /**
+   * Save a terminal session (to today's bucket)
+   */
+  saveSession(session: TerminalSession): void {
+    try {
+      const db = this.getDb();
+      const today = getDateString();
+      const now = new Date().toISOString();
+
+      const stmt = db.prepare(`
+        INSERT INTO terminal_sessions
+        (session_id, project_path, title, cwd, is_claude_mode, claude_session_id, output_buffer, worktree_config_json, session_date, created_at, last_active_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, session_date) DO UPDATE SET
+          title = excluded.title,
+          cwd = excluded.cwd,
+          is_claude_mode = excluded.is_claude_mode,
+          claude_session_id = excluded.claude_session_id,
+          output_buffer = excluded.output_buffer,
+          worktree_config_json = excluded.worktree_config_json,
+          last_active_at = excluded.last_active_at
+      `);
+
+      stmt.run(
+        session.id,
+        session.projectPath,
+        session.title,
+        session.cwd,
+        session.isClaudeMode ? 1 : 0,
+        session.claudeSessionId || null,
+        session.outputBuffer.slice(-MAX_OUTPUT_BUFFER),
+        session.worktreeConfig ? JSON.stringify(session.worktreeConfig) : null,
+        today,
+        session.createdAt || now,
+        now
+      );
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error saving session:', error);
+    }
+  }
+
+  /**
    * Get most recent sessions for a project.
    * First checks today, then looks at the most recent date with sessions.
-   * When restoring from a previous date, MIGRATES sessions to today to prevent
-   * duplication issues across days.
-   * Validates worktree configs - clears them if worktree no longer exists.
+   * When restoring from a previous date, MIGRATES sessions to today.
    */
   getSessions(projectPath: string): TerminalSession[] {
-    const today = getDateString();
+    try {
+      const db = this.getDb();
+      const today = getDateString();
 
-    // First check today
-    const todaySessions = this.getTodaysSessions();
-    if (todaySessions[projectPath]?.length > 0) {
-      // Validate worktree configs before returning
-      return todaySessions[projectPath].map(session => ({
-        ...session,
-        worktreeConfig: this.validateWorktreeConfig(session.worktreeConfig),
-      }));
-    }
+      // First check today
+      const todaySessions = db.prepare(`
+        SELECT * FROM terminal_sessions
+        WHERE project_path = ? AND session_date = ?
+        ORDER BY last_active_at DESC
+      `).all(projectPath, today) as TerminalSessionRow[];
 
-    // If no sessions today, find the most recent date with sessions for this project
-    const dates = Object.keys(this.data.sessionsByDate)
-      .filter(date => {
-        // Exclude today since we already checked it
-        if (date === today) return false;
-        const sessions = this.data.sessionsByDate[date][projectPath];
-        return sessions && sessions.length > 0;
-      })
-      .sort((a, b) => b.localeCompare(a));  // Most recent first
-
-    if (dates.length > 0) {
-      const mostRecentDate = dates[0];
-      console.warn(`[TerminalSessionStore] No sessions today, migrating sessions from ${mostRecentDate} to today`);
-      const sessions = this.data.sessionsByDate[mostRecentDate][projectPath] || [];
-
-      // MIGRATE: Copy sessions to today's bucket with validated worktree configs
-      const migratedSessions = sessions.map(session => ({
-        ...session,
-        worktreeConfig: this.validateWorktreeConfig(session.worktreeConfig),
-        // Update lastActiveAt to now since we're restoring them
-        lastActiveAt: new Date().toISOString(),
-      }));
-
-      // Add migrated sessions to today
-      todaySessions[projectPath] = migratedSessions;
-
-      // Remove sessions from the old date to prevent duplication
-      delete this.data.sessionsByDate[mostRecentDate][projectPath];
-
-      // Clean up empty date buckets
-      if (Object.keys(this.data.sessionsByDate[mostRecentDate]).length === 0) {
-        delete this.data.sessionsByDate[mostRecentDate];
+      if (todaySessions.length > 0) {
+        return todaySessions.map(row => this.rowToSession(row));
       }
 
-      // Save the migration
-      this.save();
+      // If no sessions today, find the most recent date with sessions for this project
+      const mostRecentDate = db.prepare(`
+        SELECT DISTINCT session_date FROM terminal_sessions
+        WHERE project_path = ? AND session_date != ?
+        ORDER BY session_date DESC
+        LIMIT 1
+      `).get(projectPath, today) as { session_date: string } | undefined;
 
-      console.warn(`[TerminalSessionStore] Migrated ${migratedSessions.length} sessions from ${mostRecentDate} to ${today}`);
+      if (mostRecentDate) {
+        console.warn(`[TerminalSessionStore] No sessions today, migrating sessions from ${mostRecentDate.session_date} to today`);
 
-      return migratedSessions;
+        const oldSessions = db.prepare(`
+          SELECT * FROM terminal_sessions
+          WHERE project_path = ? AND session_date = ?
+        `).all(projectPath, mostRecentDate.session_date) as TerminalSessionRow[];
+
+        // Migrate: update session_date to today
+        const now = new Date().toISOString();
+        const updateStmt = db.prepare(`
+          UPDATE terminal_sessions
+          SET session_date = ?, last_active_at = ?
+          WHERE project_path = ? AND session_date = ?
+        `);
+        updateStmt.run(today, now, projectPath, mostRecentDate.session_date);
+
+        console.warn(`[TerminalSessionStore] Migrated ${oldSessions.length} sessions from ${mostRecentDate.session_date} to ${today}`);
+
+        return oldSessions.map(row => ({
+          ...this.rowToSession(row),
+          lastActiveAt: now,
+        }));
+      }
+
+      return [];
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error getting sessions:', error);
+      return [];
     }
-
-    return [];
   }
 
   /**
    * Get sessions for a specific date and project
-   * Validates worktree configs - clears them if worktree no longer exists.
    */
   getSessionsForDate(date: string, projectPath: string): TerminalSession[] {
-    const dateSessions = this.data.sessionsByDate[date];
-    if (!dateSessions) return [];
-    const sessions = dateSessions[projectPath] || [];
-    // Validate worktree configs before returning
-    return sessions.map(session => ({
-      ...session,
-      worktreeConfig: this.validateWorktreeConfig(session.worktreeConfig),
-    }));
+    try {
+      const db = this.getDb();
+      const rows = db.prepare(`
+        SELECT * FROM terminal_sessions
+        WHERE project_path = ? AND session_date = ?
+        ORDER BY last_active_at DESC
+      `).all(projectPath, date) as TerminalSessionRow[];
+
+      return rows.map(row => this.rowToSession(row));
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error getting sessions for date:', error);
+      return [];
+    }
   }
 
   /**
    * Get all sessions for a specific date (all projects)
    */
   getAllSessionsForDate(date: string): Record<string, TerminalSession[]> {
-    return this.data.sessionsByDate[date] || {};
+    try {
+      const db = this.getDb();
+      const rows = db.prepare(`
+        SELECT * FROM terminal_sessions
+        WHERE session_date = ?
+        ORDER BY project_path, last_active_at DESC
+      `).all(date) as TerminalSessionRow[];
+
+      const result: Record<string, TerminalSession[]> = {};
+      for (const row of rows) {
+        if (!result[row.project_path]) {
+          result[row.project_path] = [];
+        }
+        result[row.project_path].push(this.rowToSession(row));
+      }
+
+      return result;
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error getting all sessions for date:', error);
+      return {};
+    }
   }
 
   /**
    * Get available session dates with metadata
    */
   getAvailableDates(projectPath?: string): SessionDateInfo[] {
-    const dates = Object.keys(this.data.sessionsByDate)
-      .filter(date => {
-        // If projectPath specified, only include dates with sessions for that project
-        if (projectPath) {
-          const sessions = this.data.sessionsByDate[date][projectPath];
-          return sessions && sessions.length > 0;
-        }
-        return true;
-      })
-      .sort((a, b) => b.localeCompare(a));  // Most recent first
+    try {
+      const db = this.getDb();
 
-    return dates.map(date => {
-      const dateSessions = this.data.sessionsByDate[date];
-      let sessionCount = 0;
-      let projectCount = 0;
+      let query: string;
+      let params: string[];
 
-      for (const [projPath, sessions] of Object.entries(dateSessions)) {
-        if (!projectPath || projPath === projectPath) {
-          if (sessions.length > 0) {
-            sessionCount += sessions.length;
-            projectCount++;
-          }
-        }
+      if (projectPath) {
+        query = `
+          SELECT session_date, COUNT(*) as session_count, COUNT(DISTINCT project_path) as project_count
+          FROM terminal_sessions
+          WHERE project_path = ?
+          GROUP BY session_date
+          ORDER BY session_date DESC
+        `;
+        params = [projectPath];
+      } else {
+        query = `
+          SELECT session_date, COUNT(*) as session_count, COUNT(DISTINCT project_path) as project_count
+          FROM terminal_sessions
+          GROUP BY session_date
+          ORDER BY session_date DESC
+        `;
+        params = [];
       }
 
-      return {
-        date,
-        label: getDateLabel(date),
-        sessionCount,
-        projectCount
-      };
-    }).filter(info => info.sessionCount > 0);  // Only dates with actual sessions
+      const rows = db.prepare(query).all(...params) as Array<{
+        session_date: string;
+        session_count: number;
+        project_count: number;
+      }>;
+
+      return rows.map(row => ({
+        date: row.session_date,
+        label: getDateLabel(row.session_date),
+        sessionCount: row.session_count,
+        projectCount: row.project_count,
+      }));
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error getting available dates:', error);
+      return [];
+    }
   }
 
   /**
    * Get a specific session
    */
   getSession(projectPath: string, sessionId: string): TerminalSession | undefined {
-    const todaySessions = this.getTodaysSessions();
-    const sessions = todaySessions[projectPath] || [];
-    return sessions.find(s => s.id === sessionId);
+    try {
+      const db = this.getDb();
+      const today = getDateString();
+
+      const row = db.prepare(`
+        SELECT * FROM terminal_sessions
+        WHERE project_path = ? AND session_id = ? AND session_date = ?
+      `).get(projectPath, sessionId, today) as TerminalSessionRow | undefined;
+
+      return row ? this.rowToSession(row) : undefined;
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error getting session:', error);
+      return undefined;
+    }
   }
 
   /**
    * Remove a session (from today's sessions)
    */
   removeSession(projectPath: string, sessionId: string): void {
-    const todaySessions = this.getTodaysSessions();
-    if (todaySessions[projectPath]) {
-      todaySessions[projectPath] = todaySessions[projectPath].filter(
-        s => s.id !== sessionId
-      );
-      this.save();
+    try {
+      const db = this.getDb();
+      const today = getDateString();
+
+      db.prepare(`
+        DELETE FROM terminal_sessions
+        WHERE project_path = ? AND session_id = ? AND session_date = ?
+      `).run(projectPath, sessionId, today);
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error removing session:', error);
     }
   }
 
@@ -373,39 +393,69 @@ export class TerminalSessionStore {
    * Clear all sessions for a project (from today)
    */
   clearProjectSessions(projectPath: string): void {
-    const todaySessions = this.getTodaysSessions();
-    delete todaySessions[projectPath];
-    this.save();
+    try {
+      const db = this.getDb();
+      const today = getDateString();
+
+      db.prepare(`
+        DELETE FROM terminal_sessions
+        WHERE project_path = ? AND session_date = ?
+      `).run(projectPath, today);
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error clearing project sessions:', error);
+    }
   }
 
   /**
    * Clear sessions for a specific date and project
    */
   clearSessionsForDate(date: string, projectPath?: string): void {
-    if (projectPath) {
-      if (this.data.sessionsByDate[date]) {
-        delete this.data.sessionsByDate[date][projectPath];
+    try {
+      const db = this.getDb();
+
+      if (projectPath) {
+        db.prepare(`
+          DELETE FROM terminal_sessions
+          WHERE project_path = ? AND session_date = ?
+        `).run(projectPath, date);
+      } else {
+        db.prepare(`
+          DELETE FROM terminal_sessions
+          WHERE session_date = ?
+        `).run(date);
       }
-    } else {
-      delete this.data.sessionsByDate[date];
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error clearing sessions for date:', error);
     }
-    this.save();
   }
 
   /**
-   * Update output buffer for a session (called frequently, batched save)
+   * Update output buffer for a session
    */
   updateOutputBuffer(projectPath: string, sessionId: string, output: string): void {
-    const todaySessions = this.getTodaysSessions();
-    const sessions = todaySessions[projectPath];
-    if (!sessions) return;
+    try {
+      const db = this.getDb();
+      const today = getDateString();
+      const now = new Date().toISOString();
 
-    const session = sessions.find(s => s.id === sessionId);
-    if (session) {
-      session.outputBuffer = (session.outputBuffer + output).slice(-MAX_OUTPUT_BUFFER);
-      session.lastActiveAt = new Date().toISOString();
-      // Note: We don't save immediately here to avoid excessive disk writes
-      // Call saveAllPending() periodically or on app quit
+      // Get current buffer and append
+      const row = db.prepare(`
+        SELECT output_buffer FROM terminal_sessions
+        WHERE project_path = ? AND session_id = ? AND session_date = ?
+      `).get(projectPath, sessionId, today) as { output_buffer: string | null } | undefined;
+
+      if (row) {
+        const currentBuffer = row.output_buffer || '';
+        const newBuffer = (currentBuffer + output).slice(-MAX_OUTPUT_BUFFER);
+
+        db.prepare(`
+          UPDATE terminal_sessions
+          SET output_buffer = ?, last_active_at = ?
+          WHERE project_path = ? AND session_id = ? AND session_date = ?
+        `).run(newBuffer, now, projectPath, sessionId, today);
+      }
+    } catch (error) {
+      // Don't log errors for frequent buffer updates to avoid spam
     }
   }
 
@@ -413,31 +463,56 @@ export class TerminalSessionStore {
    * Update Claude session ID for a terminal
    */
   updateClaudeSessionId(projectPath: string, terminalId: string, claudeSessionId: string): void {
-    const todaySessions = this.getTodaysSessions();
-    const sessions = todaySessions[projectPath];
-    if (!sessions) return;
+    try {
+      const db = this.getDb();
+      const today = getDateString();
 
-    const session = sessions.find(s => s.id === terminalId);
-    if (session) {
-      session.claudeSessionId = claudeSessionId;
-      session.isClaudeMode = true;
-      this.save();
+      db.prepare(`
+        UPDATE terminal_sessions
+        SET claude_session_id = ?, is_claude_mode = 1
+        WHERE project_path = ? AND session_id = ? AND session_date = ?
+      `).run(claudeSessionId, projectPath, terminalId, today);
+
       console.warn('[TerminalSessionStore] Saved Claude session ID:', claudeSessionId, 'for terminal:', terminalId);
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error updating Claude session ID:', error);
     }
   }
 
   /**
-   * Save all pending changes (call on app quit or periodically)
+   * Save all pending changes - no-op for SQLite (commits are automatic)
    */
   saveAllPending(): void {
-    this.save();
+    // SQLite commits are automatic, nothing to do
   }
 
   /**
    * Get all sessions (for debugging)
    */
-  getAllSessions(): SessionData {
-    return this.data;
+  getAllSessions(): { version: number; sessionsByDate: Record<string, Record<string, TerminalSession[]>> } {
+    try {
+      const db = this.getDb();
+      const rows = db.prepare(`
+        SELECT * FROM terminal_sessions
+        ORDER BY session_date DESC, project_path, last_active_at DESC
+      `).all() as TerminalSessionRow[];
+
+      const sessionsByDate: Record<string, Record<string, TerminalSession[]>> = {};
+      for (const row of rows) {
+        if (!sessionsByDate[row.session_date]) {
+          sessionsByDate[row.session_date] = {};
+        }
+        if (!sessionsByDate[row.session_date][row.project_path]) {
+          sessionsByDate[row.session_date][row.project_path] = [];
+        }
+        sessionsByDate[row.session_date][row.project_path].push(this.rowToSession(row));
+      }
+
+      return { version: 2, sessionsByDate };
+    } catch (error) {
+      console.error('[TerminalSessionStore] Error getting all sessions:', error);
+      return { version: 2, sessionsByDate: {} };
+    }
   }
 }
 

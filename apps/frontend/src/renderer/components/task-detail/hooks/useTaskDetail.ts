@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useProjectStore } from '../../../stores/project-store';
 import { checkTaskRunning, isIncompleteHumanReview, getTaskProgress } from '../../../stores/task-store';
-import type { Task, TaskLogs, TaskLogPhase, WorktreeStatus, WorktreeDiff, MergeConflict, MergeStats, GitConflictInfo } from '../../../../shared/types';
+import type { Task, TaskLogs, TaskLogPhase, WorktreeStatus, WorktreeDiff, MergeConflict, MergeStats, GitConflictInfo, TaskResetDataInfo } from '../../../../shared/types';
 
 export interface UseTaskDetailOptions {
   task: Task;
@@ -46,6 +46,12 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
   } | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [showConflictDialog, setShowConflictDialog] = useState(false);
+
+  // Reset task state (for stopped tasks with data that can be reset)
+  const [resetDataInfo, setResetDataInfo] = useState<TaskResetDataInfo | null>(null);
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [showResetDialog, setShowResetDialog] = useState(false);
 
   const selectedProject = useProjectStore((state) => state.getSelectedProject());
   // Task is "running" if it's in_progress OR ai_review (QA agent is actively reviewing/fixing)
@@ -162,6 +168,28 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
       setWorktreeDiff(null);
     }
   }, [task.id, needsReview]);
+
+  // Check if stopped task has reset-able data (worktree, logs, artifacts)
+  useEffect(() => {
+    // Only check for reset data when task is in backlog (stopped/not started)
+    if (task.status === 'backlog') {
+      window.electronAPI.checkTaskHasResetData(task.id)
+        .then((result) => {
+          if (result.success && result.data) {
+            setResetDataInfo(result.data);
+          } else {
+            setResetDataInfo(null);
+          }
+        })
+        .catch((err) => {
+          console.error('Failed to check task reset data:', err);
+          setResetDataInfo(null);
+        });
+    } else {
+      // Clear reset data info when task is not in backlog
+      setResetDataInfo(null);
+    }
+  }, [task.id, task.status]);
 
   // Load and watch phase logs
   useEffect(() => {
@@ -301,6 +329,10 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
     mergePreview,
     isLoadingPreview,
     showConflictDialog,
+    resetDataInfo,
+    isResetting,
+    resetError,
+    showResetDialog,
 
     // Setters
     setFeedback,
@@ -332,6 +364,10 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
     setMergePreview,
     setIsLoadingPreview,
     setShowConflictDialog,
+    setResetDataInfo,
+    setIsResetting,
+    setResetError,
+    setShowResetDialog,
 
     // Handlers
     handleLogsScroll,

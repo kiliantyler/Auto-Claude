@@ -27,7 +27,8 @@ import {
   Loader2,
   AlertTriangle,
   Pencil,
-  X
+  X,
+  RefreshCw
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { calculateProgress } from '../../lib/utils';
@@ -133,6 +134,28 @@ function TaskDetailModalContent({ open, task, onOpenChange, onSwitchToTerminals,
     }
     state.setIsDeleting(false);
   };
+
+  const handleReset = async () => {
+    state.setIsResetting(true);
+    state.setResetError(null);
+    const result = await window.electronAPI.resetTask(task.id);
+    if (result.success) {
+      state.setShowResetDialog(false);
+      // Reset the reset data info since we just reset
+      state.setResetDataInfo(null);
+      toast({
+        title: t('tasks:notifications.taskReset'),
+        description: t('tasks:notifications.taskResetDescription'),
+        duration: 3000,
+      });
+    } else {
+      state.setResetError(result.error || 'Failed to reset task');
+    }
+    state.setIsResetting(false);
+  };
+
+  // Can reset when task is in backlog and has reset-able data
+  const canReset = task.status === 'backlog' && state.resetDataInfo?.hasResetData;
 
   const handleMerge = async () => {
     state.setIsMerging(true);
@@ -508,11 +531,32 @@ function TaskDetailModalContent({ open, task, onOpenChange, onSwitchToTerminals,
                 size="sm"
                 className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                 onClick={() => state.setShowDeleteDialog(true)}
-                disabled={state.isRunning && !state.isStuck}
+                disabled={(state.isRunning && !state.isStuck) || state.isResetting}
               >
                 <Trash2 className="mr-2 h-4 w-4" />
-                Delete Task
+                {t('tasks:actions.deleteTask')}
               </Button>
+              {canReset && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground hover:text-warning hover:bg-warning/10"
+                  onClick={() => state.setShowResetDialog(true)}
+                  disabled={state.isResetting}
+                >
+                  {state.isResetting ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      {t('tasks:actions.resetting')}
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      {t('tasks:actions.resetTask')}
+                    </>
+                  )}
+                </Button>
+              )}
               <div className="flex-1" />
               {renderPrimaryAction()}
               <Button variant="outline" onClick={handleClose}>
@@ -573,6 +617,66 @@ function TaskDetailModalContent({ open, task, onOpenChange, onSwitchToTerminals,
                 <>
                   <Trash2 className="mr-2 h-4 w-4" />
                   Delete Permanently
+                </>
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Reset Confirmation Dialog */}
+      <AlertDialog open={state.showResetDialog} onOpenChange={state.setShowResetDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <RefreshCw className="h-5 w-5 text-warning" />
+              {t('tasks:resetDialog.title')}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="text-sm text-muted-foreground space-y-3">
+                <p>
+                  {t('tasks:resetDialog.confirmMessage', { title: task.title })}
+                </p>
+                <div className="bg-muted/50 rounded-lg p-3 space-y-1">
+                  <p className="font-medium text-foreground text-xs">{t('tasks:resetDialog.willDelete')}:</p>
+                  <ul className="text-xs space-y-0.5 ml-4 list-disc">
+                    {state.resetDataInfo?.hasWorktree && <li>{t('tasks:resetDialog.worktree')}</li>}
+                    {state.resetDataInfo?.hasLogs && <li>{t('tasks:resetDialog.logs')}</li>}
+                    {state.resetDataInfo?.hasImplementationPlan && <li>{t('tasks:resetDialog.implementationPlan')}</li>}
+                    {state.resetDataInfo?.hasQaReport && <li>{t('tasks:resetDialog.qaReport')}</li>}
+                    {state.resetDataInfo?.hasMemoryDir && <li>{t('tasks:resetDialog.memoryData')}</li>}
+                  </ul>
+                </div>
+                <p className="text-xs">
+                  {t('tasks:resetDialog.keepSpec')}
+                </p>
+                {state.resetError && (
+                  <p className="text-destructive bg-destructive/10 px-3 py-2 rounded-lg text-sm">
+                    {state.resetError}
+                  </p>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={state.isResetting}>{t('common:cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                handleReset();
+              }}
+              disabled={state.isResetting}
+              className="bg-warning text-warning-foreground hover:bg-warning/90"
+            >
+              {state.isResetting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {t('tasks:actions.resetting')}
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  {t('tasks:resetDialog.confirmButton')}
                 </>
               )}
             </AlertDialogAction>

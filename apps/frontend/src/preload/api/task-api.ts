@@ -31,6 +31,7 @@ export interface TaskAPI {
   startTask: (taskId: string, options?: TaskStartOptions) => void;
   stopTask: (taskId: string) => void;
   resetTask: (taskId: string) => Promise<IPCResult>;
+  checkTaskHasResetData: (taskId: string) => Promise<IPCResult<import('../../shared/types').TaskResetDataInfo>>;
   submitReview: (
     taskId: string,
     approved: boolean,
@@ -112,6 +113,9 @@ export const createTaskAPI = (): TaskAPI => ({
 
   resetTask: (taskId: string): Promise<IPCResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_RESET, taskId),
+
+  checkTaskHasResetData: (taskId: string): Promise<IPCResult<import('../../shared/types').TaskResetDataInfo>> =>
+    ipcRenderer.invoke(IPC_CHANNELS.TASK_HAS_RESET_DATA, taskId),
 
   submitReview: (
     taskId: string,

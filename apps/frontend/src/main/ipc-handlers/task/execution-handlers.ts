@@ -526,6 +526,65 @@ export function registerTaskExecutionHandlers(
   });
 
   /**
+   * Check if a task has data that can be reset (worktree, logs, artifacts)
+   * Used to show reset button for stopped tasks that have associated artifacts
+   */
+  ipcMain.handle(
+    IPC_CHANNELS.TASK_HAS_RESET_DATA,
+    async (_, taskId: string): Promise<IPCResult<import('../../../shared/types').TaskResetDataInfo>> => {
+      const { task, project } = findTaskAndProject(taskId);
+
+      if (!task || !project) {
+        return { success: false, error: 'Task not found' };
+      }
+
+      const specsBaseDir = getSpecsDir(project.autoBuildPath);
+      const mainSpecDir = path.join(project.path, specsBaseDir, task.specId);
+
+      // Check for worktree
+      const worktreePath = findTaskWorktree(project.path, task.specId);
+      const hasWorktree = worktreePath !== null;
+
+      // Check for logs in SQLite
+      let hasLogs = false;
+      try {
+        const storage = getProjectTaskStorage(project.path);
+        const logs = storage.getTaskLogs(task.id);
+        // Check if any phase has entries
+        hasLogs = logs !== null && (
+          logs.phases.planning.entries.length > 0 ||
+          logs.phases.coding.entries.length > 0 ||
+          logs.phases.validation.entries.length > 0
+        );
+      } catch {
+        // Storage error, assume no logs
+      }
+
+      // Check for execution artifacts in spec directory
+      const hasImplementationPlan = existsSync(path.join(mainSpecDir, 'implementation_plan.json'));
+      const hasQaReport = existsSync(path.join(mainSpecDir, AUTO_BUILD_PATHS.QA_REPORT)) ||
+                          existsSync(path.join(mainSpecDir, 'QA_FIX_REQUEST.md'));
+      const hasMemoryDir = existsSync(path.join(mainSpecDir, 'memory')) ||
+                          existsSync(path.join(mainSpecDir, 'graphiti'));
+
+      // Has reset data if any of the above is true
+      const hasResetData = hasWorktree || hasLogs || hasImplementationPlan || hasQaReport || hasMemoryDir;
+
+      return {
+        success: true,
+        data: {
+          hasResetData,
+          hasWorktree,
+          hasLogs,
+          hasImplementationPlan,
+          hasQaReport,
+          hasMemoryDir
+        }
+      };
+    }
+  );
+
+  /**
    * Review a task (approve or reject)
    */
   ipcMain.handle(

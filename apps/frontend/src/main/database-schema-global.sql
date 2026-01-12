@@ -72,6 +72,25 @@ CREATE TABLE IF NOT EXISTS undo_stack (
   description TEXT  -- Human-readable description of the operation
 );
 
+-- Terminal Sessions Table
+-- Stores terminal session history organized by date
+-- Replaces userData/sessions/terminals.json
+CREATE TABLE IF NOT EXISTS terminal_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,  -- The terminal session ID (uuid)
+  project_path TEXT NOT NULL,  -- Which project this terminal belongs to
+  title TEXT NOT NULL,
+  cwd TEXT NOT NULL,  -- Current working directory
+  is_claude_mode INTEGER NOT NULL DEFAULT 0,
+  claude_session_id TEXT,  -- Claude session ID for resume functionality
+  output_buffer TEXT,  -- Last 100KB of output for replay
+  worktree_config_json TEXT,  -- JSON: associated worktree configuration
+  session_date TEXT NOT NULL,  -- YYYY-MM-DD for date organization
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_active_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(session_id, session_date)  -- Session ID unique per date
+);
+
 -- ============================================
 -- Indexes for Query Optimization
 -- ============================================
@@ -86,6 +105,11 @@ CREATE INDEX IF NOT EXISTS idx_event_queue_entity ON event_queue(entity_type, en
 
 -- Undo stack indexes
 CREATE INDEX IF NOT EXISTS idx_undo_stack_session ON undo_stack(session_id, sequence);
+
+-- Terminal sessions indexes
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_project ON terminal_sessions(project_path);
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_date ON terminal_sessions(session_date DESC);
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_last_active ON terminal_sessions(last_active_at DESC);
 
 -- ============================================
 -- Triggers for Event System
@@ -126,7 +150,7 @@ END;
 -- ============================================
 
 -- Schema version metadata
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '002');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '003');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_type', 'global');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('last_migration', datetime('now'));

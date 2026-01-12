@@ -1,4 +1,5 @@
-import { Play, Square, CheckCircle2, RotateCcw, Trash2, Loader2, AlertTriangle } from 'lucide-react';
+import { Play, Square, CheckCircle2, RotateCcw, Trash2, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { Button } from '../ui/button';
 import {
   AlertDialog,
@@ -10,7 +11,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '../ui/alert-dialog';
-import type { Task } from '../../../shared/types';
+import type { Task, TaskResetDataInfo } from '../../../shared/types';
 
 interface TaskActionsProps {
   task: Task;
@@ -21,10 +22,17 @@ interface TaskActionsProps {
   showDeleteDialog: boolean;
   isDeleting: boolean;
   deleteError: string | null;
+  // Reset task props
+  resetDataInfo: TaskResetDataInfo | null;
+  isResetting: boolean;
+  resetError: string | null;
+  showResetDialog: boolean;
   onStartStop: () => void;
   onRecover: () => void;
   onDelete: () => void;
   onShowDeleteDialog: (show: boolean) => void;
+  onReset: () => void;
+  onShowResetDialog: (show: boolean) => void;
 }
 
 export function TaskActions({
@@ -36,11 +44,22 @@ export function TaskActions({
   showDeleteDialog,
   isDeleting,
   deleteError,
+  resetDataInfo,
+  isResetting,
+  resetError,
+  showResetDialog,
   onStartStop,
   onRecover,
   onDelete,
-  onShowDeleteDialog
+  onShowDeleteDialog,
+  onReset,
+  onShowResetDialog
 }: TaskActionsProps) {
+  const { t } = useTranslation(['tasks', 'common']);
+
+  // Show reset button when task is in backlog and has reset-able data
+  const canReset = task.status === 'backlog' && resetDataInfo?.hasResetData;
+
   return (
     <>
       <div className="p-4">
@@ -98,18 +117,101 @@ export function TaskActions({
           </div>
         )}
 
+        {/* Reset Button - visible for stopped tasks with reset-able data */}
+        {canReset && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full mt-3 text-muted-foreground hover:text-warning hover:border-warning"
+            onClick={() => onShowResetDialog(true)}
+            disabled={isResetting}
+          >
+            {isResetting ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                {t('tasks:actions.resetting')}
+              </>
+            ) : (
+              <>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                {t('tasks:actions.resetTask')}
+              </>
+            )}
+          </Button>
+        )}
+
         {/* Delete Button - always visible but disabled when running */}
         <Button
           variant="ghost"
           size="sm"
           className="w-full mt-3 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
           onClick={() => onShowDeleteDialog(true)}
-          disabled={isRunning && !isStuck}
+          disabled={(isRunning && !isStuck) || isResetting}
         >
           <Trash2 className="mr-2 h-4 w-4" />
-          Delete Task
+          {t('tasks:actions.deleteTask')}
         </Button>
       </div>
+
+      {/* Reset Confirmation Dialog */}
+      <AlertDialog open={showResetDialog} onOpenChange={onShowResetDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <RefreshCw className="h-5 w-5 text-warning" />
+              {t('tasks:resetDialog.title')}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="text-sm text-muted-foreground space-y-3">
+                <p>
+                  {t('tasks:resetDialog.confirmMessage', { title: task.title })}
+                </p>
+                <div className="bg-muted/50 rounded-lg p-3 space-y-1">
+                  <p className="font-medium text-foreground text-xs">{t('tasks:resetDialog.willDelete')}:</p>
+                  <ul className="text-xs space-y-0.5 ml-4 list-disc">
+                    {resetDataInfo?.hasWorktree && <li>{t('tasks:resetDialog.worktree')}</li>}
+                    {resetDataInfo?.hasLogs && <li>{t('tasks:resetDialog.logs')}</li>}
+                    {resetDataInfo?.hasImplementationPlan && <li>{t('tasks:resetDialog.implementationPlan')}</li>}
+                    {resetDataInfo?.hasQaReport && <li>{t('tasks:resetDialog.qaReport')}</li>}
+                    {resetDataInfo?.hasMemoryDir && <li>{t('tasks:resetDialog.memoryData')}</li>}
+                  </ul>
+                </div>
+                <p className="text-xs">
+                  {t('tasks:resetDialog.keepSpec')}
+                </p>
+                {resetError && (
+                  <p className="text-destructive bg-destructive/10 px-3 py-2 rounded-lg text-sm">
+                    {resetError}
+                  </p>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isResetting}>{t('common:cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                onReset();
+              }}
+              disabled={isResetting}
+              className="bg-warning text-warning-foreground hover:bg-warning/90"
+            >
+              {isResetting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {t('tasks:actions.resetting')}
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  {t('tasks:resetDialog.confirmButton')}
+                </>
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Delete Confirmation Dialog */}
       <AlertDialog open={showDeleteDialog} onOpenChange={onShowDeleteDialog}>

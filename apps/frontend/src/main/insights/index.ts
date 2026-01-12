@@ -3,8 +3,8 @@
  *
  * This module provides a clean separation of concerns:
  * - config: Environment and configuration management
- * - paths: Path resolution utilities
- * - session-storage: Filesystem persistence layer
+ * - paths: Path resolution utilities (legacy, kept for reference)
+ * - session-storage: SQLite persistence layer (project-local database)
  * - session-manager: Session lifecycle management
  * - insights-executor: Python process execution
  */

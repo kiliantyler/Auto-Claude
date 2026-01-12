@@ -14,6 +14,9 @@
     "resume": "Resume",
     "archive": "Archive",
     "delete": "Delete",
+    "deleteTask": "Delete Task",
+    "resetTask": "Reset Task",
+    "resetting": "Resetting...",
     "view": "View Details",
     "moveTo": "Move to",
     "taskActions": "Task actions"
@@ -121,7 +124,21 @@
   },
   "notifications": {
     "backgroundTaskTitle": "Task continues in background",
-    "backgroundTaskDescription": "The task is still running. You can reopen this dialog to monitor progress."
+    "backgroundTaskDescription": "The task is still running. You can reopen this dialog to monitor progress.",
+    "taskReset": "Task Reset",
+    "taskResetDescription": "Task has been reset. You can now start fresh."
+  },
+  "resetDialog": {
+    "title": "Reset Task",
+    "confirmMessage": "Are you sure you want to reset \"{{title}}\"?",
+    "willDelete": "This will delete",
+    "worktree": "Git worktree and branch",
+    "logs": "Execution logs",
+    "implementationPlan": "Implementation plan",
+    "qaReport": "QA reports and fix requests",
+    "memoryData": "Memory and session data",
+    "keepSpec": "The task specification (spec.md) will be kept so you can start over.",
+    "confirmButton": "Reset Task"
   },
   "wizard": {
     "gitOptions": {

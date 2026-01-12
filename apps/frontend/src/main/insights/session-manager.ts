@@ -1,23 +1,20 @@
 import type { InsightsSession, InsightsSessionSummary, InsightsModelConfig } from '../../shared/types';
 import { SessionStorage } from './session-storage';
-import { InsightsPaths } from './paths';
 
 /**
  * Session manager
- * Manages in-memory session cache and coordinates with session storage
+ * Manages in-memory session cache and coordinates with session storage (SQLite)
  */
 export class SessionManager {
   private sessions: Map<string, InsightsSession> = new Map();
   private storage: SessionStorage;
-  private paths: InsightsPaths;
 
-  constructor(storage: SessionStorage, paths: InsightsPaths) {
+  constructor(storage: SessionStorage) {
     this.storage = storage;
-    this.paths = paths;
   }
 
   /**
-   * Load current session from disk or cache
+   * Load current session from database or cache
    */
   loadSession(projectId: string, projectPath: string): InsightsSession | null {
     // Check in-memory cache first
@@ -25,7 +22,7 @@ export class SessionManager {
       return this.sessions.get(projectId)!;
     }
 
-    // Migrate old format if needed
+    // Migrate old format if needed (no-op for SQLite)
     this.storage.migrateOldSession(projectPath);
 
     const currentSessionId = this.storage.getCurrentSessionId(projectPath);
@@ -42,7 +39,7 @@ export class SessionManager {
    * List all sessions for a project
    */
   listSessions(projectPath: string): InsightsSessionSummary[] {
-    // Migrate old format if needed
+    // Migrate old format if needed (no-op for SQLite)
     this.storage.migrateOldSession(projectPath);
     return this.storage.listSessions(projectPath);
   }
@@ -144,7 +141,7 @@ export class SessionManager {
   }
 
   /**
-   * Save session to disk and update cache
+   * Save session to database and update cache
    */
   saveSession(projectPath: string, session: InsightsSession): void {
     this.storage.saveSession(projectPath, session);
@@ -160,7 +157,7 @@ export class SessionManager {
   }
 
   /**
-   * Get cached session without loading from disk
+   * Get cached session without loading from database
    */
   getCachedSession(projectId: string): InsightsSession | null {
     return this.sessions.get(projectId) || null;

@@ -14,6 +14,9 @@
     "resume": "Reprendre",
     "archive": "Archiver",
     "delete": "Supprimer",
+    "deleteTask": "Supprimer la tâche",
+    "resetTask": "Réinitialiser la tâche",
+    "resetting": "Réinitialisation...",
     "view": "Voir les détails",
     "moveTo": "Déplacer vers",
     "taskActions": "Actions de la tâche"
@@ -121,7 +124,21 @@
   },
   "notifications": {
     "backgroundTaskTitle": "La tâche continue en arrière-plan",
-    "backgroundTaskDescription": "La tâche est toujours en cours. Vous pouvez rouvrir cette boîte de dialogue pour suivre la progression."
+    "backgroundTaskDescription": "La tâche est toujours en cours. Vous pouvez rouvrir cette boîte de dialogue pour suivre la progression.",
+    "taskReset": "Tâche réinitialisée",
+    "taskResetDescription": "La tâche a été réinitialisée. Vous pouvez maintenant recommencer."
+  },
+  "resetDialog": {
+    "title": "Réinitialiser la tâche",
+    "confirmMessage": "Êtes-vous sûr de vouloir réinitialiser \"{{title}}\" ?",
+    "willDelete": "Cela supprimera",
+    "worktree": "Le worktree Git et la branche",
+    "logs": "Les journaux d'exécution",
+    "implementationPlan": "Le plan d'implémentation",
+    "qaReport": "Les rapports QA et demandes de correction",
+    "memoryData": "Les données de mémoire et de session",
+    "keepSpec": "La spécification de la tâche (spec.md) sera conservée pour que vous puissiez recommencer.",
+    "confirmButton": "Réinitialiser la tâche"
   },
   "wizard": {
     "gitOptions": {

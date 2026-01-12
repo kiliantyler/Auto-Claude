@@ -6,7 +6,6 @@ import type {
   InsightsModelConfig
 } from '../shared/types';
 import { InsightsConfig } from './insights/config';
-import { InsightsPaths } from './insights/paths';
 import { SessionStorage } from './insights/session-storage';
 import { SessionManager } from './insights/session-manager';
 import { InsightsExecutor } from './insights/insights-executor';
@@ -16,14 +15,12 @@ import { InsightsExecutor } from './insights/insights-executor';
  *
  * This service coordinates between multiple specialized modules:
  * - InsightsConfig: Manages configuration and environment
- * - InsightsPaths: Provides consistent path resolution
- * - SessionStorage: Handles filesystem persistence
+ * - SessionStorage: Handles SQLite persistence (project-local database)
  * - SessionManager: Manages session lifecycle and cache
  * - InsightsExecutor: Executes Python insights runner
  */
 export class InsightsService extends EventEmitter {
   private config: InsightsConfig;
-  private paths: InsightsPaths;
   private storage: SessionStorage;
   private sessionManager: SessionManager;
   private executor: InsightsExecutor;
@@ -33,9 +30,8 @@ export class InsightsService extends EventEmitter {
 
     // Initialize modules
     this.config = new InsightsConfig();
-    this.paths = new InsightsPaths();
-    this.storage = new SessionStorage(this.paths);
-    this.sessionManager = new SessionManager(this.storage, this.paths);
+    this.storage = new SessionStorage();
+    this.sessionManager = new SessionManager(this.storage);
     this.executor = new InsightsExecutor(this.config);
 
     // Forward executor events

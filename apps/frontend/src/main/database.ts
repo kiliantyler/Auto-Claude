@@ -33,8 +33,8 @@ import { logSqliteFeatures, checkCompileOption } from './utils/sqlite-features';
 /**
  * Schema version constants
  */
-const GLOBAL_SCHEMA_VERSION = '002';
-const PROJECT_SCHEMA_VERSION = '007';
+const GLOBAL_SCHEMA_VERSION = '003';
+const PROJECT_SCHEMA_VERSION = '008';
 
 /**
  * Base DatabaseConnection class

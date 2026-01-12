@@ -24,6 +24,7 @@ export const IPC_CHANNELS = {
   TASK_START: 'task:start',
   TASK_STOP: 'task:stop',
   TASK_RESET: 'task:reset',  // Reset task completely (delete worktree, spec, start fresh)
+  TASK_HAS_RESET_DATA: 'task:hasResetData',  // Check if task has data that can be reset (worktree, logs, artifacts)
   TASK_REVIEW: 'task:review',
   TASK_UPDATE_STATUS: 'task:updateStatus',
   TASK_RECOVER_STUCK: 'task:recoverStuck',
