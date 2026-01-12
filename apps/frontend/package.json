@@ -45,7 +45,8 @@
     "test:e2e": "npx playwright test --config=e2e/playwright.config.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:fts5": "node scripts/verify-fts5.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",

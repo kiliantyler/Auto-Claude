@@ -30,6 +30,7 @@ import Database from 'better-sqlite3';
 import { app } from 'electron';
 import { existsSync, mkdirSync } from 'fs';
 import path from 'path';
+import { logSqliteFeatures, checkCompileOption } from './utils/sqlite-features';
 
 export class DatabaseConnection {
   private db: Database.Database | null = null;
@@ -76,6 +77,18 @@ export class DatabaseConnection {
 
       // Set synchronous mode to NORMAL for good balance of safety and performance
       this.db.pragma('synchronous = NORMAL');
+
+      // Log SQLite features (including FTS5 status) for debugging
+      logSqliteFeatures(this.db);
+
+      // Verify FTS5 is available (required for Phase 4B full-text search)
+      const fts5Enabled = checkCompileOption(this.db, 'ENABLE_FTS5');
+      if (!fts5Enabled) {
+        console.warn(
+          '[Database] WARNING: FTS5 is not enabled. Full-text search features will not work. ' +
+            'Try running: npm run rebuild'
+        );
+      }
 
       console.log(`[Database] Initialized SQLite database at: ${this.dbPath}`);
     }
