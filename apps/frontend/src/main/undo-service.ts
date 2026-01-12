@@ -13,8 +13,17 @@
  * - Session-based operation grouping
  * - Configurable stack size limit (default: 50)
  * - Feature flag support (ENABLE_UNDO)
+ * - Automatic inverse operation generation for all operation types
  *
- * Usage:
+ * Supported Operation Types:
+ * - task_create: Create a new task (inverse: delete)
+ * - task_delete: Delete a task (inverse: create from snapshot)
+ * - task_update: Update a task field (inverse: swap old/new values)
+ * - task_status_change: Change task status (inverse: swap old/new status)
+ * - task_move: Move task between projects (inverse: swap project IDs)
+ * - batch: Multiple operations together (inverse: reversed, inverted batch)
+ *
+ * Usage - Basic (manual operation/inverse):
  * ```typescript
  * const service = getUndoService();
  *
@@ -33,6 +42,53 @@
  * // Get current stack state
  * const state = service.getStack();
  * ```
+ *
+ * Usage - With Convenience Methods (automatic inverse generation):
+ * ```typescript
+ * const service = getUndoService();
+ *
+ * // Record task creation
+ * const task = taskStorage.createTask(newTask);
+ * service.recordTaskCreate(task);
+ *
+ * // Record task deletion (call BEFORE deleting)
+ * const task = taskStorage.getTask(taskId);
+ * service.recordTaskDelete(task);
+ * taskStorage.deleteTask(taskId);
+ *
+ * // Record task update
+ * const oldTitle = task.title;
+ * taskStorage.updateTask(task.id, { title: 'New Title' });
+ * service.recordTaskUpdate(task.id, 'title', oldTitle, 'New Title');
+ *
+ * // Record status change
+ * service.recordStatusChange(task.id, 'backlog', 'in_progress');
+ *
+ * // Record task move
+ * service.recordTaskMove(task.id, oldProjectId, newProjectId);
+ * ```
+ *
+ * Usage - Helper Functions (for custom integration):
+ * ```typescript
+ * import {
+ *   createInverseOperation,
+ *   createTaskCreateOperationPair,
+ *   createTaskDeleteOperationPair,
+ *   createTaskUpdateOperationPair,
+ *   createTaskStatusChangeOperationPair,
+ *   createTaskMoveOperationPair,
+ *   createBatchOperationPair,
+ *   createTaskSnapshot,
+ * } from './undo-service';
+ *
+ * // Generate inverse automatically
+ * const { operation, inverseOperation } = createTaskUpdateOperationPair(
+ *   taskId, 'title', 'Old Title', 'New Title'
+ * );
+ *
+ * // Or invert an existing operation
+ * const inverse = createInverseOperation(someOperation);
+ * ```
  */
 
 import type {
@@ -46,13 +102,397 @@ import type {
   UndoConfig,
   TaskCreateData,
   TaskUpdateData,
+  TaskDeleteData,
   TaskStatusChangeData,
   TaskMoveData,
   BatchOperationData,
+  TaskSnapshot,
+  Task,
+  TaskStatus,
 } from '../shared/types';
 import { DEFAULT_UNDO_CONFIG, generateOperationDescription } from '../shared/types';
 import { getDatabaseConnection } from './database';
 import { getTaskStorage } from './task-storage';
+
+// ============================================================================
+// Inverse Operation Generation Helpers
+// ============================================================================
+
+/**
+ * Create the inverse of any UndoOperation
+ *
+ * This is the core function that generates an inverse operation for any
+ * supported operation type. The inverse operation is what gets executed
+ * when the user performs an "undo".
+ *
+ * @param operation - The operation to create an inverse for
+ * @returns The inverse operation
+ *
+ * @example
+ * ```typescript
+ * const createOp = { type: 'task_create', taskId: 'task-1', data: { taskSnapshot } };
+ * const inverseOp = createInverseOperation(createOp);
+ * // inverseOp = { type: 'task_delete', taskId: 'task-1', data: { taskSnapshot } }
+ * ```
+ */
+export function createInverseOperation(operation: UndoOperation): UndoOperation {
+  switch (operation.type) {
+    case 'task_create': {
+      // Inverse of create is delete (with same snapshot for potential re-creation)
+      const data = operation.data as TaskCreateData;
+      return {
+        type: 'task_delete',
+        taskId: operation.taskId,
+        data: {
+          taskSnapshot: data.taskSnapshot,
+        } as TaskDeleteData,
+      };
+    }
+
+    case 'task_delete': {
+      // Inverse of delete is create (recreate from snapshot)
+      const data = operation.data as TaskDeleteData;
+      return {
+        type: 'task_create',
+        taskId: operation.taskId,
+        data: {
+          taskSnapshot: data.taskSnapshot,
+        } as TaskCreateData,
+      };
+    }
+
+    case 'task_update': {
+      // Inverse of update is update with swapped old/new values
+      const data = operation.data as TaskUpdateData;
+      return {
+        type: 'task_update',
+        taskId: operation.taskId,
+        data: {
+          fieldName: data.fieldName,
+          oldValue: data.newValue, // Swap: new becomes old
+          newValue: data.oldValue, // Swap: old becomes new
+        } as TaskUpdateData,
+      };
+    }
+
+    case 'task_status_change': {
+      // Inverse of status change is status change with swapped statuses
+      const data = operation.data as TaskStatusChangeData;
+      return {
+        type: 'task_status_change',
+        taskId: operation.taskId,
+        data: {
+          oldStatus: data.newStatus, // Swap: new becomes old
+          newStatus: data.oldStatus, // Swap: old becomes new
+        } as TaskStatusChangeData,
+      };
+    }
+
+    case 'task_move': {
+      // Inverse of move is move with swapped project IDs
+      const data = operation.data as TaskMoveData;
+      return {
+        type: 'task_move',
+        taskId: operation.taskId,
+        data: {
+          oldProjectId: data.newProjectId, // Swap: new becomes old
+          newProjectId: data.oldProjectId, // Swap: old becomes new
+          oldPosition: data.newPosition,
+          newPosition: data.oldPosition,
+        } as TaskMoveData,
+      };
+    }
+
+    case 'batch': {
+      // Inverse of batch is batch with reversed operations (each inverted)
+      const data = operation.data as BatchOperationData;
+      const invertedOps = data.operations
+        .map((op) => createInverseOperation(op))
+        .reverse(); // Reverse order for correct undo sequence
+      return {
+        type: 'batch',
+        taskId: operation.taskId,
+        data: {
+          operations: invertedOps,
+        } as BatchOperationData,
+      };
+    }
+
+    default:
+      throw new Error(`Cannot create inverse for unknown operation type: ${operation.type}`);
+  }
+}
+
+/**
+ * Create a task snapshot from a Task object
+ *
+ * Extracts the essential fields needed to recreate a task.
+ *
+ * @param task - The task to snapshot
+ * @returns TaskSnapshot with serialized data
+ */
+export function createTaskSnapshot(task: Task): TaskSnapshot {
+  return {
+    id: task.id,
+    specId: task.specId,
+    projectId: task.projectId,
+    title: task.title,
+    description: task.description,
+    status: task.status,
+    metadataJson: task.metadata ? JSON.stringify(task.metadata) : undefined,
+    createdAt: task.createdAt instanceof Date ? task.createdAt.toISOString() : task.createdAt,
+    updatedAt: task.updatedAt instanceof Date ? task.updatedAt.toISOString() : task.updatedAt,
+  };
+}
+
+/**
+ * Create a task_create operation with automatic inverse generation
+ *
+ * Use this when a new task is created. The inverse is a delete operation.
+ *
+ * @param task - The task that was created
+ * @returns Object with operation and inverseOperation
+ *
+ * @example
+ * ```typescript
+ * const task = await taskStorage.createTask(newTaskData);
+ * const { operation, inverseOperation } = createTaskCreateOperationPair(task);
+ * undoService.pushOperation(operation, inverseOperation);
+ * ```
+ */
+export function createTaskCreateOperationPair(task: Task): {
+  operation: UndoOperation;
+  inverseOperation: UndoOperation;
+} {
+  const snapshot = createTaskSnapshot(task);
+  const operation: UndoOperation = {
+    type: 'task_create',
+    taskId: task.id,
+    data: {
+      taskSnapshot: snapshot,
+    } as TaskCreateData,
+  };
+
+  return {
+    operation,
+    inverseOperation: createInverseOperation(operation),
+  };
+}
+
+/**
+ * Create a task_delete operation with automatic inverse generation
+ *
+ * Use this before deleting a task. The inverse is a create operation
+ * that will restore the task from its snapshot.
+ *
+ * @param task - The task that will be/was deleted
+ * @returns Object with operation and inverseOperation
+ *
+ * @example
+ * ```typescript
+ * const task = taskStorage.getTask(taskId);
+ * const { operation, inverseOperation } = createTaskDeleteOperationPair(task);
+ * taskStorage.deleteTask(taskId);
+ * undoService.pushOperation(operation, inverseOperation);
+ * ```
+ */
+export function createTaskDeleteOperationPair(task: Task): {
+  operation: UndoOperation;
+  inverseOperation: UndoOperation;
+} {
+  const snapshot = createTaskSnapshot(task);
+  const operation: UndoOperation = {
+    type: 'task_delete',
+    taskId: task.id,
+    data: {
+      taskSnapshot: snapshot,
+    } as TaskDeleteData,
+  };
+
+  return {
+    operation,
+    inverseOperation: createInverseOperation(operation),
+  };
+}
+
+/**
+ * Create a task_update operation with automatic inverse generation
+ *
+ * Use this when updating a task field. The inverse swaps old/new values.
+ *
+ * @param taskId - The ID of the task being updated
+ * @param fieldName - The name of the field being updated
+ * @param oldValue - The previous value
+ * @param newValue - The new value
+ * @returns Object with operation and inverseOperation
+ *
+ * @example
+ * ```typescript
+ * const oldTitle = task.title;
+ * task.title = 'New Title';
+ * const { operation, inverseOperation } = createTaskUpdateOperationPair(
+ *   task.id, 'title', oldTitle, task.title
+ * );
+ * undoService.pushOperation(operation, inverseOperation);
+ * ```
+ */
+export function createTaskUpdateOperationPair(
+  taskId: string,
+  fieldName: string,
+  oldValue: unknown,
+  newValue: unknown
+): {
+  operation: UndoOperation;
+  inverseOperation: UndoOperation;
+} {
+  const operation: UndoOperation = {
+    type: 'task_update',
+    taskId,
+    data: {
+      fieldName,
+      oldValue,
+      newValue,
+    } as TaskUpdateData,
+  };
+
+  return {
+    operation,
+    inverseOperation: createInverseOperation(operation),
+  };
+}
+
+/**
+ * Create a task_status_change operation with automatic inverse generation
+ *
+ * Use this when changing a task's status. The inverse swaps old/new statuses.
+ *
+ * @param taskId - The ID of the task
+ * @param oldStatus - The previous status
+ * @param newStatus - The new status
+ * @returns Object with operation and inverseOperation
+ *
+ * @example
+ * ```typescript
+ * const oldStatus = task.status;
+ * task.status = 'completed';
+ * const { operation, inverseOperation } = createTaskStatusChangeOperationPair(
+ *   task.id, oldStatus, task.status
+ * );
+ * undoService.pushOperation(operation, inverseOperation);
+ * ```
+ */
+export function createTaskStatusChangeOperationPair(
+  taskId: string,
+  oldStatus: TaskStatus,
+  newStatus: TaskStatus
+): {
+  operation: UndoOperation;
+  inverseOperation: UndoOperation;
+} {
+  const operation: UndoOperation = {
+    type: 'task_status_change',
+    taskId,
+    data: {
+      oldStatus,
+      newStatus,
+    } as TaskStatusChangeData,
+  };
+
+  return {
+    operation,
+    inverseOperation: createInverseOperation(operation),
+  };
+}
+
+/**
+ * Create a task_move operation with automatic inverse generation
+ *
+ * Use this when moving a task between projects. The inverse swaps project IDs.
+ *
+ * @param taskId - The ID of the task
+ * @param oldProjectId - The previous project ID
+ * @param newProjectId - The new project ID
+ * @param oldPosition - Optional previous position in the column
+ * @param newPosition - Optional new position in the column
+ * @returns Object with operation and inverseOperation
+ *
+ * @example
+ * ```typescript
+ * const oldProjectId = task.projectId;
+ * task.projectId = newProjectId;
+ * const { operation, inverseOperation } = createTaskMoveOperationPair(
+ *   task.id, oldProjectId, newProjectId
+ * );
+ * undoService.pushOperation(operation, inverseOperation);
+ * ```
+ */
+export function createTaskMoveOperationPair(
+  taskId: string,
+  oldProjectId: string,
+  newProjectId: string,
+  oldPosition?: number,
+  newPosition?: number
+): {
+  operation: UndoOperation;
+  inverseOperation: UndoOperation;
+} {
+  const operation: UndoOperation = {
+    type: 'task_move',
+    taskId,
+    data: {
+      oldProjectId,
+      newProjectId,
+      oldPosition,
+      newPosition,
+    } as TaskMoveData,
+  };
+
+  return {
+    operation,
+    inverseOperation: createInverseOperation(operation),
+  };
+}
+
+/**
+ * Create a batch operation with automatic inverse generation
+ *
+ * Use this when performing multiple operations atomically.
+ * The inverse reverses and inverts all operations.
+ *
+ * @param operations - Array of operations to batch
+ * @param primaryTaskId - The ID of the primary task (for reference)
+ * @returns Object with operation and inverseOperation
+ *
+ * @example
+ * ```typescript
+ * const ops = [
+ *   createTaskUpdateOperationPair(task1.id, 'title', 'Old1', 'New1').operation,
+ *   createTaskUpdateOperationPair(task2.id, 'title', 'Old2', 'New2').operation,
+ * ];
+ * const { operation, inverseOperation } = createBatchOperationPair(ops, task1.id);
+ * undoService.pushOperation(operation, inverseOperation);
+ * ```
+ */
+export function createBatchOperationPair(
+  operations: UndoOperation[],
+  primaryTaskId: string
+): {
+  operation: UndoOperation;
+  inverseOperation: UndoOperation;
+} {
+  const operation: UndoOperation = {
+    type: 'batch',
+    taskId: primaryTaskId,
+    data: {
+      operations,
+    } as BatchOperationData,
+  };
+
+  return {
+    operation,
+    inverseOperation: createInverseOperation(operation),
+  };
+}
 
 /**
  * Generate a unique session ID for grouping operations
@@ -449,6 +889,203 @@ export class UndoService {
       console.error('[UndoService] Failed to cleanup old sessions:', error);
       return 0;
     }
+  }
+
+  // ============================================================================
+  // Convenience Methods - Push with Automatic Inverse Generation
+  // ============================================================================
+
+  /**
+   * Record a task creation for undo
+   *
+   * Automatically generates the inverse operation (delete) and pushes to stack.
+   *
+   * @param task - The task that was created
+   * @param options - Optional push options
+   * @returns UndoStackEntry or null if push failed
+   *
+   * @example
+   * ```typescript
+   * const task = taskStorage.createTask(newTaskData);
+   * undoService.recordTaskCreate(task);
+   * ```
+   */
+  recordTaskCreate(task: Task, options?: UndoPushOptions): UndoStackEntry | null {
+    const { operation, inverseOperation } = createTaskCreateOperationPair(task);
+    return this.pushOperation(operation, inverseOperation, {
+      ...options,
+      description: options?.description ?? `Create task "${task.title}"`,
+    });
+  }
+
+  /**
+   * Record a task deletion for undo
+   *
+   * Automatically generates the inverse operation (create from snapshot) and pushes to stack.
+   * Call this BEFORE deleting the task so the snapshot is captured correctly.
+   *
+   * @param task - The task that will be deleted (with full data for restoration)
+   * @param options - Optional push options
+   * @returns UndoStackEntry or null if push failed
+   *
+   * @example
+   * ```typescript
+   * const task = taskStorage.getTask(taskId);
+   * undoService.recordTaskDelete(task);
+   * taskStorage.deleteTask(taskId);
+   * ```
+   */
+  recordTaskDelete(task: Task, options?: UndoPushOptions): UndoStackEntry | null {
+    const { operation, inverseOperation } = createTaskDeleteOperationPair(task);
+    return this.pushOperation(operation, inverseOperation, {
+      ...options,
+      description: options?.description ?? `Delete task "${task.title}"`,
+    });
+  }
+
+  /**
+   * Record a task field update for undo
+   *
+   * Automatically generates the inverse operation and pushes to stack.
+   *
+   * @param taskId - The ID of the task being updated
+   * @param fieldName - The name of the field being updated
+   * @param oldValue - The previous value
+   * @param newValue - The new value
+   * @param options - Optional push options
+   * @returns UndoStackEntry or null if push failed
+   *
+   * @example
+   * ```typescript
+   * const oldTitle = task.title;
+   * taskStorage.updateTask(task.id, { title: 'New Title' });
+   * undoService.recordTaskUpdate(task.id, 'title', oldTitle, 'New Title');
+   * ```
+   */
+  recordTaskUpdate(
+    taskId: string,
+    fieldName: string,
+    oldValue: unknown,
+    newValue: unknown,
+    options?: UndoPushOptions
+  ): UndoStackEntry | null {
+    const { operation, inverseOperation } = createTaskUpdateOperationPair(
+      taskId,
+      fieldName,
+      oldValue,
+      newValue
+    );
+    return this.pushOperation(operation, inverseOperation, {
+      ...options,
+      description: options?.description ?? `Update ${fieldName}`,
+    });
+  }
+
+  /**
+   * Record a task status change for undo
+   *
+   * Automatically generates the inverse operation and pushes to stack.
+   *
+   * @param taskId - The ID of the task
+   * @param oldStatus - The previous status
+   * @param newStatus - The new status
+   * @param options - Optional push options
+   * @returns UndoStackEntry or null if push failed
+   *
+   * @example
+   * ```typescript
+   * const oldStatus = task.status;
+   * taskStorage.updateTask(task.id, { status: 'completed' });
+   * undoService.recordStatusChange(task.id, oldStatus, 'completed');
+   * ```
+   */
+  recordStatusChange(
+    taskId: string,
+    oldStatus: TaskStatus,
+    newStatus: TaskStatus,
+    options?: UndoPushOptions
+  ): UndoStackEntry | null {
+    const { operation, inverseOperation } = createTaskStatusChangeOperationPair(
+      taskId,
+      oldStatus,
+      newStatus
+    );
+    return this.pushOperation(operation, inverseOperation, {
+      ...options,
+      description: options?.description ?? `Change status: ${oldStatus} → ${newStatus}`,
+    });
+  }
+
+  /**
+   * Record a task move between projects for undo
+   *
+   * Automatically generates the inverse operation and pushes to stack.
+   *
+   * @param taskId - The ID of the task
+   * @param oldProjectId - The previous project ID
+   * @param newProjectId - The new project ID
+   * @param oldPosition - Optional previous position
+   * @param newPosition - Optional new position
+   * @param options - Optional push options
+   * @returns UndoStackEntry or null if push failed
+   *
+   * @example
+   * ```typescript
+   * const oldProjectId = task.projectId;
+   * taskStorage.updateTask(task.id, { projectId: newProjectId });
+   * undoService.recordTaskMove(task.id, oldProjectId, newProjectId);
+   * ```
+   */
+  recordTaskMove(
+    taskId: string,
+    oldProjectId: string,
+    newProjectId: string,
+    oldPosition?: number,
+    newPosition?: number,
+    options?: UndoPushOptions
+  ): UndoStackEntry | null {
+    const { operation, inverseOperation } = createTaskMoveOperationPair(
+      taskId,
+      oldProjectId,
+      newProjectId,
+      oldPosition,
+      newPosition
+    );
+    return this.pushOperation(operation, inverseOperation, {
+      ...options,
+      description: options?.description ?? 'Move task to different project',
+    });
+  }
+
+  /**
+   * Record a batch of operations for undo
+   *
+   * Use this when performing multiple related operations that should be undone together.
+   *
+   * @param operations - Array of operations to batch
+   * @param primaryTaskId - The ID of the primary task (for reference)
+   * @param options - Optional push options
+   * @returns UndoStackEntry or null if push failed
+   *
+   * @example
+   * ```typescript
+   * const ops = [
+   *   createTaskUpdateOperationPair(task1.id, 'title', 'Old1', 'New1').operation,
+   *   createTaskUpdateOperationPair(task2.id, 'title', 'Old2', 'New2').operation,
+   * ];
+   * undoService.recordBatchOperation(ops, task1.id, { description: 'Bulk update' });
+   * ```
+   */
+  recordBatchOperation(
+    operations: UndoOperation[],
+    primaryTaskId: string,
+    options?: UndoPushOptions
+  ): UndoStackEntry | null {
+    const { operation, inverseOperation } = createBatchOperationPair(operations, primaryTaskId);
+    return this.pushOperation(operation, inverseOperation, {
+      ...options,
+      description: options?.description ?? `${operations.length} operations`,
+    });
   }
 
   /**
