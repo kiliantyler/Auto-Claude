@@ -18,6 +18,7 @@ import {
 import { findTaskWorktree } from '../../worktree-paths';
 import { projectStore } from '../../project-store';
 import { getToolPath } from '../../cli-tool-manager';
+import { getTaskStorage } from '../../task-storage';
 
 /**
  * Atomic file write to prevent TOCTOU race conditions.
@@ -261,6 +262,17 @@ export function registerTaskExecutionHandlers(
         } catch (err) {
           console.error('[TASK_START] Failed to persist plan status:', err);
         }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: 'in_progress' });
+          if (DEBUG) {
+            console.log(`[TASK_START] Updated task status in database: in_progress`);
+          }
+        } catch (dbErr) {
+          console.error('[TASK_START] Failed to update task status in database:', dbErr);
+        }
       });
       // Note: Plan file may not exist yet for new tasks - that's fine (persistPlanStatus handles ENOENT)
     }
@@ -422,6 +434,17 @@ export function registerTaskExecutionHandlers(
                 }
               }
             }
+
+            // Dual-write: Update status in SQLite database
+            try {
+              const storage = getTaskStorage();
+              storage.updateTask(taskId, { status: 'backlog' });
+              if (DEBUG) {
+                console.log(`[TASK_STOP] Updated task status in database: backlog`);
+              }
+            } catch (dbErr) {
+              console.error('[TASK_STOP] Failed to update task status in database:', dbErr);
+            }
           }
 
           if (DEBUG) {
@@ -565,6 +588,17 @@ export function registerTaskExecutionHandlers(
         );
       }
 
+      // Dual-write: Update status in SQLite database
+      try {
+        const storage = getTaskStorage();
+        storage.updateTask(taskId, { status: 'backlog' });
+        if (DEBUG) {
+          console.log(`[TASK_RESET] Updated task status in database: backlog`);
+        }
+      } catch (dbErr) {
+        console.error('[TASK_RESET] Failed to update task status in database:', dbErr);
+      }
+
       // 4. Clear execution progress
       if (mainWindow) {
         mainWindow.webContents.send(
@@ -641,6 +675,15 @@ export function registerTaskExecutionHandlers(
             'done'
           );
         }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: 'done' });
+          console.debug(`[TASK_REVIEW] Updated task status in database: done`);
+        } catch (dbErr) {
+          console.error('[TASK_REVIEW] Failed to update task status in database:', dbErr);
+        }
       } else {
         // Reset and discard all changes from worktree merge in main
         // The worktree still has all changes, so nothing is lost
@@ -710,6 +753,15 @@ export function registerTaskExecutionHandlers(
             taskId,
             'in_progress'
           );
+        }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: 'in_progress' });
+          console.debug(`[TASK_REVIEW] Updated task status in database: in_progress`);
+        } catch (dbErr) {
+          console.error('[TASK_REVIEW] Failed to update task status in database:', dbErr);
         }
       }
 
@@ -907,6 +959,15 @@ export function registerTaskExecutionHandlers(
               'in_progress'
             );
           }
+        }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status });
+          console.debug(`[TASK_UPDATE_STATUS] Updated task status in database: ${status}`);
+        } catch (dbErr) {
+          console.error('[TASK_UPDATE_STATUS] Failed to update task status in database:', dbErr);
         }
 
         return { success: true };
@@ -1335,6 +1396,15 @@ export function registerTaskExecutionHandlers(
             taskId,
             newStatus
           );
+        }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: newStatus });
+          console.debug(`[TASK_RECOVER_STUCK] Updated task status in database: ${newStatus}`);
+        } catch (dbErr) {
+          console.error('[TASK_RECOVER_STUCK] Failed to update task status in database:', dbErr);
         }
 
         return {
