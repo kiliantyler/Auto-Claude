@@ -519,5 +519,14 @@ export const IPC_CHANNELS = {
   // Sentry error reporting
   SENTRY_STATE_CHANGED: 'sentry:state-changed',  // Notify main process when setting changes
   GET_SENTRY_DSN: 'sentry:get-dsn',              // Get DSN from main process (env var)
-  GET_SENTRY_CONFIG: 'sentry:get-config'         // Get full Sentry config (DSN + sample rates)
+  GET_SENTRY_CONFIG: 'sentry:get-config',        // Get full Sentry config (DSN + sample rates)
+
+  // History operations (task audit logging)
+  HISTORY_GET_TASK_HISTORY: 'history:get-task-history',      // Get full history for a specific task
+  HISTORY_GET_RECENT: 'history:get-recent',                  // Get recent changes across all tasks
+  HISTORY_GET_SESSION: 'history:get-session',                // Get all changes for a specific session
+  HISTORY_IS_ENABLED: 'history:is-enabled',                  // Check if history feature is enabled
+  HISTORY_GET_RECENT_SESSIONS: 'history:get-recent-sessions', // Get list of recent sessions
+  HISTORY_QUERY: 'history:query',                            // Query history with flexible filters
+  HISTORY_GET_TASK_HISTORY_COUNT: 'history:get-task-history-count' // Get count of history entries for a task
 } as const;
