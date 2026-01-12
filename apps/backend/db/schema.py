@@ -134,19 +134,15 @@ def initialize_schema(db: "DatabaseConnection") -> None:
         if SCHEMA_SQL_PATH.exists():
             schema_sql = SCHEMA_SQL_PATH.read_text()
 
-            # Split by semicolon and execute each statement
-            # This handles multi-statement SQL files
-            statements = schema_sql.split(";")
-            for statement in statements:
-                statement = statement.strip()
-                if statement and not statement.startswith("--"):
-                    try:
-                        conn.execute(statement)
-                    except sqlite3.OperationalError as e:
-                        # Ignore errors for things like duplicate indexes
-                        # or already existing objects
-                        if "already exists" not in str(e):
-                            raise
+            # Use executescript for multi-statement SQL files
+            # This properly handles comments and multiple statements
+            try:
+                conn.executescript(schema_sql)
+            except sqlite3.OperationalError as e:
+                # Ignore errors for things like duplicate indexes
+                # or already existing objects
+                if "already exists" not in str(e):
+                    raise
 
         # Add markdown content columns to tasks table
         for column, column_type in TASKS_TABLE_COLUMNS:

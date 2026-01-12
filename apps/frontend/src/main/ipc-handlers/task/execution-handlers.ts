@@ -462,7 +462,7 @@ export function registerTaskExecutionHandlers(
         console.warn(`[TASK_RESET] Cleaned execution artifacts (kept spec.md)`);
       }
 
-      // 3. Update task status to backlog
+      // 3. Update task status to backlog and reset subtasks/executionProgress
       const mainWindow = getMainWindow();
       if (mainWindow) {
         mainWindow.webContents.send(
@@ -474,11 +474,20 @@ export function registerTaskExecutionHandlers(
 
       // Update status in project-local SQLite database
       // Use task.id (the actual database ID) not taskId (which might be specId)
+      // Clear subtasks entirely (not just reset to pending) so the task starts fresh
+      // This is necessary because we deleted implementation_plan.json from disk
       try {
         const storage = getProjectTaskStorage(project.path);
-        storage.updateTask(task.id, { status: 'backlog' });
+
+        storage.updateTask(task.id, {
+          status: 'backlog',
+          subtasks: [],  // Clear subtasks - they'll be recreated when run.py generates new plan
+          executionProgress: undefined,
+          qaReport: undefined,  // Clear QA report too
+        });
+
         if (DEBUG) {
-          console.log(`[TASK_RESET] Updated task status in database: ${task.id} -> backlog`);
+          console.log(`[TASK_RESET] Updated task in database: ${task.id} -> backlog, cleared subtasks and QA report`);
         }
       } catch (dbErr) {
         console.error('[TASK_RESET] Failed to update task status in database:', dbErr);

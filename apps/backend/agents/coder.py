@@ -104,7 +104,13 @@ async def run_autonomous_agent(
     status_manager.set_active(spec_dir.name, BuildState.BUILDING)
 
     # Initialize task logger for persistent logging
-    task_logger = get_task_logger(spec_dir)
+    # When running in a worktree, use the main project directory for SQLite storage
+    # source_spec_dir is in main project: /project/.auto-claude/specs/XXX
+    # -> .parent = /project/.auto-claude/specs
+    # -> .parent.parent = /project/.auto-claude
+    # -> .parent.parent.parent = /project (main project root)
+    main_project_dir = source_spec_dir.parent.parent.parent if source_spec_dir else project_dir
+    task_logger = get_task_logger(spec_dir, project_dir=main_project_dir)
 
     # Debug: Print memory system status at startup
     debug_memory_system_status()

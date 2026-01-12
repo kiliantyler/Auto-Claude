@@ -11,7 +11,9 @@ _current_logger: TaskLogger | None = None
 
 
 def get_task_logger(
-    spec_dir: Path | None = None, emit_markers: bool = True
+    spec_dir: Path | None = None,
+    emit_markers: bool = True,
+    project_dir: Path | None = None,
 ) -> TaskLogger | None:
     """
     Get or create a task logger for the given spec directory.
@@ -19,6 +21,7 @@ def get_task_logger(
     Args:
         spec_dir: Path to the spec directory (creates new logger if different from current)
         emit_markers: Whether to emit streaming markers
+        project_dir: Path to the main project directory (for SQLite storage)
 
     Returns:
         TaskLogger instance or None if no spec_dir
@@ -29,7 +32,7 @@ def get_task_logger(
         return _current_logger
 
     if _current_logger is None or _current_logger.spec_dir != spec_dir:
-        _current_logger = TaskLogger(spec_dir, emit_markers)
+        _current_logger = TaskLogger(spec_dir, emit_markers, project_dir=project_dir)
 
     return _current_logger
 

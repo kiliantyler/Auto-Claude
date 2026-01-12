@@ -28,7 +28,6 @@ from task_logger import (
     clear_task_logger,
     get_active_phase,
     get_task_logger,
-    load_task_logs,
     update_task_logger_path,
 )
 
@@ -41,7 +40,6 @@ __all__ = [
     # Main logger
     "TaskLogger",
     # Storage utilities
-    "load_task_logs",
     "get_active_phase",
     # Utility functions
     "get_task_logger",

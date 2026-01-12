@@ -31,13 +31,14 @@ class TaskLogger:
 
     LOG_FILE = "task_logs.json"
 
-    def __init__(self, spec_dir: Path, emit_markers: bool = True):
+    def __init__(self, spec_dir: Path, emit_markers: bool = True, project_dir: Path | None = None):
         """
         Initialize the task logger.
 
         Args:
             spec_dir: Path to the spec directory
             emit_markers: Whether to emit streaming markers to stdout
+            project_dir: Path to the main project directory (for SQLite storage)
         """
         self.spec_dir = Path(spec_dir)
         self.log_file = self.spec_dir / self.LOG_FILE
@@ -45,7 +46,7 @@ class TaskLogger:
         self.current_phase: LogPhase | None = None
         self.current_session: int | None = None
         self.current_subtask: str | None = None
-        self.storage = LogStorage(spec_dir)
+        self.storage = LogStorage(spec_dir, project_dir=project_dir)
 
     @property
     def _data(self) -> dict:

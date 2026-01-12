@@ -114,17 +114,18 @@ export function registerAgenteventsHandlers(
           };
 
           if (code === 0) {
-            notificationService.notifyReviewNeeded(taskTitle, project.id, taskId);
-
             // Fallback: Ensure status is updated even if COMPLETE phase event was missed
             // This prevents tasks from getting stuck in ai_review status
-            // Uses inverted logic to also handle tasks with no subtasks (treats them as complete)
+            // CRITICAL: Only move to human_review if there ARE subtasks and they're all completed
+            // If there are no subtasks, the task is still in planning phase - don't change status
             const isActiveStatus = task.status === 'in_progress' || task.status === 'ai_review';
-            const hasIncompleteSubtasks = task.subtasks && task.subtasks.length > 0 &&
-              task.subtasks.some((s) => s.status !== 'completed');
+            const hasSubtasks = task.subtasks && task.subtasks.length > 0;
+            const allSubtasksCompleted = hasSubtasks &&
+              task.subtasks.every((s) => s.status === 'completed');
 
-            if (isActiveStatus && !hasIncompleteSubtasks) {
-              console.warn(`[Task ${taskId}] Fallback: Moving to human_review (process exited successfully)`);
+            if (isActiveStatus && hasSubtasks && allSubtasksCompleted) {
+              console.warn(`[Task ${taskId}] Fallback: Moving to human_review (all subtasks completed)`);
+              notificationService.notifyReviewNeeded(taskTitle, project.id, taskId);
               persistStatus('human_review');
               // Include projectId for multi-project filtering (issue #723)
               mainWindow.webContents.send(
@@ -133,17 +134,41 @@ export function registerAgenteventsHandlers(
                 'human_review' as TaskStatus,
                 projectId
               );
+            } else if (isActiveStatus && !hasSubtasks) {
+              // No subtasks yet - task is still in planning phase, keep as backlog
+              console.warn(`[Task ${taskId}] Process exited with no subtasks - resetting to backlog`);
+              persistStatus('backlog');
+              mainWindow.webContents.send(
+                IPC_CHANNELS.TASK_STATUS_CHANGE,
+                taskId,
+                'backlog' as TaskStatus,
+                projectId
+              );
             }
           } else {
-            notificationService.notifyTaskFailed(taskTitle, project.id, taskId);
-            persistStatus('human_review');
-            // Include projectId for multi-project filtering (issue #723)
-            mainWindow.webContents.send(
-              IPC_CHANNELS.TASK_STATUS_CHANGE,
-              taskId,
-              'human_review' as TaskStatus,
-              projectId
-            );
+            // Process failed - only notify and update if there were subtasks
+            // If no subtasks, the planning phase failed - reset to backlog
+            const hasSubtasks = task.subtasks && task.subtasks.length > 0;
+            if (hasSubtasks) {
+              notificationService.notifyTaskFailed(taskTitle, project.id, taskId);
+              persistStatus('human_review');
+              // Include projectId for multi-project filtering (issue #723)
+              mainWindow.webContents.send(
+                IPC_CHANNELS.TASK_STATUS_CHANGE,
+                taskId,
+                'human_review' as TaskStatus,
+                projectId
+              );
+            } else {
+              console.warn(`[Task ${taskId}] Process failed during planning - resetting to backlog`);
+              persistStatus('backlog');
+              mainWindow.webContents.send(
+                IPC_CHANNELS.TASK_STATUS_CHANGE,
+                taskId,
+                'backlog' as TaskStatus,
+                projectId
+              );
+            }
           }
         }
       } catch (error) {
