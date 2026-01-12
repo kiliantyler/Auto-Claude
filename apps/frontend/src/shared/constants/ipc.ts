@@ -550,4 +550,13 @@ export const IPC_CHANNELS = {
 
   // Undo/Redo events (main -> renderer)
   UNDO_STATE_CHANGED: 'undo:state-changed',        // Event: undo/redo state changed
+
+  // Analytics operations (task metrics and insights)
+  ANALYTICS_GET_TASK_METRICS: 'analytics:get-task-metrics',             // Get metrics for a specific task
+  ANALYTICS_GET_PROJECT_METRICS: 'analytics:get-project-metrics',       // Get aggregated metrics for a project
+  ANALYTICS_GET_PRODUCTIVITY_STATS: 'analytics:get-productivity-stats', // Get productivity statistics
+  ANALYTICS_GET_COMPLETION_TRENDS: 'analytics:get-completion-trends',   // Get task completion trends over time
+  ANALYTICS_GET_STATUS_DISTRIBUTION: 'analytics:get-status-distribution', // Get distribution of task statuses
+  ANALYTICS_IS_ENABLED: 'analytics:is-enabled',                         // Check if analytics feature is enabled
+  ANALYTICS_REFRESH: 'analytics:refresh',                               // Refresh cached analytics data
 } as const;
