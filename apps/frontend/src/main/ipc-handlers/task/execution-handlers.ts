@@ -6,7 +6,6 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 
 import { rm } from 'fs/promises';
 import { spawnSync, execFileSync } from 'child_process';
 import { AgentManager } from '../../agent';
-import { fileWatcher } from '../../file-watcher';
 import { findTaskAndProject } from './shared';
 import { checkGitStatus } from '../../project-initializer';
 import { getClaudeProfileManager } from '../../claude-profile-manager';
@@ -157,7 +156,6 @@ export function registerTaskExecutionHandlers(
       const worktreeSpecDir = worktreePath
         ? path.join(worktreePath, specsBaseDir, task.specId)
         : undefined;
-      fileWatcher.watch(taskId, specDir, worktreeSpecDir);
 
       // Check if spec.md exists (indicates spec creation was already done or in progress)
       const specFilePath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -285,7 +283,6 @@ export function registerTaskExecutionHandlers(
     const DEBUG = process.env.DEBUG === 'true';
 
     agentManager.killTask(taskId);
-    fileWatcher.unwatch(taskId);
 
     // Notify status change IMMEDIATELY for instant UI feedback
     const ipcSentAt = Date.now();
@@ -468,7 +465,6 @@ export function registerTaskExecutionHandlers(
 
     // First, stop the task if running
     agentManager.killTask(taskId);
-    fileWatcher.unwatch(taskId);
 
     const { task, project } = findTaskAndProject(taskId);
 
@@ -900,7 +896,6 @@ export function registerTaskExecutionHandlers(
           const worktreeSpecDirForUpdate = worktreePathForUpdate
             ? path.join(worktreePathForUpdate, specsBaseDir, task.specId)
             : undefined;
-          fileWatcher.watch(taskId, specDir, worktreeSpecDirForUpdate);
 
           // Check if spec.md exists
           const specFilePath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -1278,9 +1273,6 @@ export function registerTaskExecutionHandlers(
           }
         }
 
-        // Stop file watcher if it was watching this task
-        fileWatcher.unwatch(taskId);
-
         // Auto-restart the task if requested
         let autoRestarted = false;
         if (autoRestart && project) {
@@ -1348,7 +1340,6 @@ export function registerTaskExecutionHandlers(
             const worktreeSpecDirForRecovery = worktreePathForRecovery
               ? path.join(worktreePathForRecovery, specsBaseDir, task.specId)
               : undefined;
-            fileWatcher.watch(taskId, specDirForWatcher, worktreeSpecDirForRecovery);
 
             // Check if spec.md exists to determine whether to run spec creation or task execution
             const specFilePath = path.join(specDirForWatcher, AUTO_BUILD_PATHS.SPEC_FILE);

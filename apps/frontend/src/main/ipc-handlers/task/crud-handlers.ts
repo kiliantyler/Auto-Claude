@@ -8,8 +8,6 @@ import { projectStore } from '../../project-store';
 import { titleGenerator } from '../../title-generator';
 import { AgentManager } from '../../agent';
 import { findTaskAndProject } from './shared';
-// File watcher replaced by database event poller (see database-event-poller.ts)
-// import { fileWatcher } from '../../file-watcher';
 import { findTaskWorktree } from '../../worktree-paths';
 import { getToolPath } from '../../cli-tool-manager';
 import { getTaskStorage } from '../../task-storage';

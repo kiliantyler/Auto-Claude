@@ -12,7 +12,6 @@ import type {
 import { AgentManager } from '../agent';
 import type { ProcessType, ExecutionProgressData } from '../agent';
 import { titleGenerator } from '../title-generator';
-import { fileWatcher } from '../file-watcher';
 import { projectStore } from '../project-store';
 import { notificationService } from '../notification-service';
 import { persistPlanStatusSync, getPlanPath } from './task/plan-file-utils';
@@ -71,15 +70,6 @@ export function registerAgenteventsHandlers(
       // Get project info early for multi-project filtering (issue #723)
       const { project: exitProject } = findTaskAndProject(taskId);
       const exitProjectId = exitProject?.id;
-
-      // Send final plan state to renderer BEFORE unwatching
-      // This ensures the renderer has the final subtask data (fixes 0/0 subtask bug)
-      const finalPlan = fileWatcher.getCurrentPlan(taskId);
-      if (finalPlan) {
-        mainWindow.webContents.send(IPC_CHANNELS.TASK_PROGRESS, taskId, finalPlan, exitProjectId);
-      }
-
-      fileWatcher.unwatch(taskId);
 
       if (processType === 'spec-creation') {
         console.warn(`[Task ${taskId}] Spec creation completed with code ${code}`);
@@ -247,28 +237,6 @@ export function registerAgenteventsHandlers(
           }
         }
       }
-    }
-  });
-
-  // ============================================
-  // File Watcher Events → Renderer
-  // ============================================
-
-  fileWatcher.on('progress', (taskId: string, plan: ImplementationPlan) => {
-    const mainWindow = getMainWindow();
-    if (mainWindow) {
-      // Use shared helper to find project (issue #723 - deduplicate lookup)
-      const { project } = findTaskAndProject(taskId);
-      mainWindow.webContents.send(IPC_CHANNELS.TASK_PROGRESS, taskId, plan, project?.id);
-    }
-  });
-
-  fileWatcher.on('error', (taskId: string, error: string) => {
-    const mainWindow = getMainWindow();
-    if (mainWindow) {
-      // Include projectId for multi-project filtering (issue #723)
-      const { project } = findTaskAndProject(taskId);
-      mainWindow.webContents.send(IPC_CHANNELS.TASK_ERROR, taskId, error, project?.id);
     }
   });
 }

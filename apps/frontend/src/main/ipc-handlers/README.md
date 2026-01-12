@@ -150,7 +150,6 @@ Agent event forwarding to renderer:
 - SDK rate limit events
 - Agent exit events with status transitions
 - Execution progress events
-- File watcher events
 - Implementation plan updates
 
 ## Entry Point
@@ -242,7 +241,7 @@ Original file backed up as `ipc-handlers.ts.backup`.
 Each module may depend on:
 - **Services**: AgentManager, TerminalManager, ChangelogService, etc.
 - **Stores**: projectStore
-- **Utilities**: fileWatcher, titleGenerator
+- **Utilities**: titleGenerator, database event poller
 - **Constants**: IPC_CHANNELS, AUTO_BUILD_PATHS, getSpecsDir
 - **Types**: Extensive TypeScript types from shared/types
 

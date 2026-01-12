@@ -47,7 +47,7 @@ Features:
 - Handles spec creation phase vs implementation phase
 - Auto-starts tasks when moved to in_progress
 - Intelligent recovery with subtask analysis
-- File watcher integration
+- Database event integration for real-time updates
 
 ### Worktree Handlers (`worktree-handlers.ts`)
 Manages git worktree operations:
@@ -127,7 +127,7 @@ registerTaskHandlers(agentManager, pythonEnvManager, getMainWindow);
 - `../../shared/types` - TypeScript types
 - `../../agent` - Agent management
 - `../../project-store` - Project state
-- `../../file-watcher` - File watching
+- `../../database-event-poller` - Database event poller
 - `../../task-log-service` - Log service
 - `../../title-generator` - AI title generation
 - `../../python-env-manager` - Python environment
