@@ -11,6 +11,7 @@
 -- - Event queue for IPC notification system
 -- - Task history table for audit logging (Phase 4A)
 -- - FTS5 virtual table for full-text search (Phase 4B)
+-- - Undo stack table for undo/redo operations (Phase 4C)
 -- - Indexes for query optimization (<100ms latency)
 -- - Triggers for automatic event emission on data changes
 -- - Triggers for automatic task history recording
@@ -99,6 +100,18 @@ CREATE TABLE IF NOT EXISTS task_history (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
+-- Undo Stack Table (Phase 4C)
+-- Stores undo/redo operation stack per session for reversible actions
+CREATE TABLE IF NOT EXISTS undo_stack (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  operation TEXT NOT NULL,  -- JSON serialized operation (action type + data)
+  inverse_operation TEXT NOT NULL,  -- JSON serialized inverse operation for undo
+  timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+  description TEXT  -- Human-readable description of the operation
+);
+
 -- ============================================
 -- Full-Text Search (Phase 4B)
 -- ============================================
@@ -138,6 +151,9 @@ CREATE INDEX IF NOT EXISTS idx_event_queue_entity ON event_queue(entity_type, en
 CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_history_timestamp ON task_history(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_task_history_session ON task_history(session_id);
+
+-- Undo stack indexes
+CREATE INDEX IF NOT EXISTS idx_undo_stack_session ON undo_stack(session_id, sequence);
 
 -- ============================================
 -- Triggers for Event System
