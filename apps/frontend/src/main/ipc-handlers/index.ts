@@ -36,6 +36,7 @@ import { registerTerminalWorktreeIpcHandlers } from './terminal';
 import { registerHistoryHandlers } from './history-handlers';
 import { registerSearchHandlers } from './search-handlers';
 import { registerUndoHandlers } from './undo-handlers';
+import { registerAnalyticsHandlers } from './analytics-handlers';
 import { notificationService } from '../notification-service';
 
 /**
@@ -130,6 +131,9 @@ export function setupIpcHandlers(
   // Undo/Redo handlers (task operation undo/redo)
   registerUndoHandlers();
 
+  // Analytics handlers (task metrics and reporting)
+  registerAnalyticsHandlers();
+
   console.warn('[IPC] All handler modules registered successfully');
 }
 
@@ -159,5 +163,6 @@ export {
   registerProfileHandlers,
   registerHistoryHandlers,
   registerSearchHandlers,
-  registerUndoHandlers
+  registerUndoHandlers,
+  registerAnalyticsHandlers
 };
