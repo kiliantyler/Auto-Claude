@@ -18,5 +18,11 @@ export * from './integrations';
 export * from './app-update';
 export * from './cli';
 
+// Phase 4 Advanced SQLite Features types
+export * from './analytics';
+export * from './history';
+export * from './search';
+export * from './undo';
+
 // IPC types (must be last to use types from other modules)
 export * from './ipc';
