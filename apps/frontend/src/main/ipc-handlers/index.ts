@@ -34,6 +34,7 @@ import { registerMcpHandlers } from './mcp-handlers';
 import { registerProfileHandlers } from './profile-handlers';
 import { registerTerminalWorktreeIpcHandlers } from './terminal';
 import { registerHistoryHandlers } from './history-handlers';
+import { registerSearchHandlers } from './search-handlers';
 import { notificationService } from '../notification-service';
 
 /**
@@ -122,6 +123,9 @@ export function setupIpcHandlers(
   // History/audit log handlers (task change tracking)
   registerHistoryHandlers();
 
+  // Search handlers (full-text search using FTS5)
+  registerSearchHandlers();
+
   console.warn('[IPC] All handler modules registered successfully');
 }
 
@@ -149,5 +153,6 @@ export {
   registerClaudeCodeHandlers,
   registerMcpHandlers,
   registerProfileHandlers,
-  registerHistoryHandlers
+  registerHistoryHandlers,
+  registerSearchHandlers
 };
