@@ -1,13 +1,15 @@
 import type { BrowserWindow } from 'electron';
 import path from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { IPC_CHANNELS, AUTO_BUILD_PATHS, getSpecsDir } from '../../shared/constants';
 import type {
   SDKRateLimitInfo,
   Task,
   TaskStatus,
   Project,
-  ImplementationPlan
+  ImplementationPlan,
+  Subtask,
+  SubtaskStatus
 } from '../../shared/types';
 import { AgentManager } from '../agent';
 import type { ProcessType, ExecutionProgressData } from '../agent';
@@ -17,6 +19,7 @@ import { notificationService } from '../notification-service';
 import { persistPlanStatusSync, getPlanPath } from './task/plan-file-utils';
 import { findTaskWorktree } from '../worktree-paths';
 import { findTaskAndProject } from './task/shared';
+import { getTaskStorage } from '../task-storage';
 
 
 /**
@@ -231,6 +234,10 @@ export function registerAgenteventsHandlers(
                 persistPlanStatusSync(worktreePlanPath, newStatus, project.id);
               }
             }
+
+            // CRITICAL: Sync plan data (including subtasks) to SQLite database
+            // This ensures subtasks are available even after app restart
+            syncPlanToDatabase(task, project, progress);
           } catch (err) {
             // Ignore persistence errors - UI will still work, just might flip on refresh
             console.warn('[execution-progress] Could not persist status:', err);
@@ -239,4 +246,82 @@ export function registerAgenteventsHandlers(
       }
     }
   });
+}
+
+/**
+ * Sync implementation plan data (subtasks, execution progress) to SQLite database
+ * Called during execution-progress events to keep database in sync with plan file
+ */
+function syncPlanToDatabase(task: Task, project: Project, progress: ExecutionProgressData): void {
+  try {
+    const specsBaseDir = getSpecsDir(project.autoBuildPath);
+
+    // Try worktree plan first (more up-to-date during execution), then main
+    const worktreePath = findTaskWorktree(project.path, task.specId);
+    let planPath = path.join(project.path, specsBaseDir, task.specId, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
+
+    if (worktreePath) {
+      const worktreePlanPath = path.join(worktreePath, specsBaseDir, task.specId, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
+      if (existsSync(worktreePlanPath)) {
+        planPath = worktreePlanPath;
+      }
+    }
+
+    if (!existsSync(planPath)) {
+      return;
+    }
+
+    // Read and parse the plan file
+    const planContent = readFileSync(planPath, 'utf-8');
+    const plan = JSON.parse(planContent) as ImplementationPlan;
+
+    // Extract subtasks from phases
+    const subtasks: Subtask[] = plan.phases?.flatMap((phase) => {
+      const items = phase.subtasks || [];
+      return items.map((subtask) => {
+        // Handle both 'id' and 'subtask_id' field names
+        const subtaskAny = subtask as unknown as Record<string, unknown>;
+        const subtaskId = subtask.id || (subtaskAny.subtask_id as string);
+        const subtaskDesc = subtask.description || (subtaskAny.title as string);
+
+        // Normalize subtask status
+        let status: SubtaskStatus = 'pending';
+        const rawStatus = (subtask.status || '').toLowerCase();
+        if (rawStatus === 'completed' || rawStatus === 'done' || rawStatus === 'passed') {
+          status = 'completed';
+        } else if (rawStatus === 'in_progress' || rawStatus === 'running') {
+          status = 'in_progress';
+        } else if (rawStatus === 'failed' || rawStatus === 'error') {
+          status = 'failed';
+        }
+
+        return {
+          id: subtaskId,
+          title: subtaskDesc,
+          description: subtaskDesc,
+          status,
+          files: [],
+          verification: subtask.verification
+        };
+      });
+    }) || [];
+
+    // Update SQLite database with subtasks and execution progress
+    const storage = getTaskStorage();
+    storage.updateTask(task.id, {
+      subtasks,
+      executionProgress: {
+        phase: progress.phase,
+        phaseProgress: progress.phaseProgress || 0,
+        overallProgress: progress.overallProgress || 0,
+        currentSubtask: progress.currentSubtask,
+        message: progress.message
+      }
+    });
+
+    console.debug(`[syncPlanToDatabase] Updated task ${task.id} with ${subtasks.length} subtasks`);
+  } catch (err) {
+    // Don't fail execution if sync fails - just log warning
+    console.warn('[syncPlanToDatabase] Failed to sync plan to database:', err);
+  }
 }

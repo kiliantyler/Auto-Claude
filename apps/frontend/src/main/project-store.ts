@@ -534,21 +534,19 @@ export class ProjectStore {
 
     let tasks: Task[] = [];
 
-    if (this.ENABLE_DUAL_WRITE) {
-      // Phase 1: Read from SQLite with fallback to directory scanning
-      const dbTasks = this.readTasksFromDatabase(projectId);
-      if (dbTasks.length > 0) {
-        tasks = dbTasks;
-        console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from SQLite database');
-      } else {
-        // Fallback to directory scanning if database is empty
-        console.warn('[ProjectStore] Database is empty, falling back to directory scanning');
-        tasks = this.scanTasksFromDirectory(project, projectId);
-      }
-    } else {
-      // Phase 2+: Directory scanning still available as backup
-      console.debug('[ProjectStore] Using directory scanning (dual-write disabled)');
+    // SQLite-only mode (ENABLE_DUAL_WRITE=false): Read from SQLite database
+    // Dual-write mode (ENABLE_DUAL_WRITE=true): Read from SQLite with JSON fallback
+    const dbTasks = this.readTasksFromDatabase(projectId);
+    if (dbTasks.length > 0) {
+      tasks = dbTasks;
+      console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from SQLite database');
+    } else if (this.ENABLE_DUAL_WRITE) {
+      // Fallback to directory scanning only if dual-write is enabled and database is empty
+      console.warn('[ProjectStore] Database is empty, falling back to directory scanning');
       tasks = this.scanTasksFromDirectory(project, projectId);
+    } else {
+      // SQLite-only mode with empty database - no fallback
+      console.debug('[ProjectStore] No tasks found in SQLite database');
     }
 
     // Update cache
