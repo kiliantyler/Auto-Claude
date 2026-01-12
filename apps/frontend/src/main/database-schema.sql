@@ -392,6 +392,26 @@ CREATE TABLE IF NOT EXISTS task_logs (
 );
 
 -- ============================================
+-- Terminal Worktrees Table
+-- ============================================
+
+-- Terminal worktree configurations
+-- Replaces .auto-claude/terminal/metadata/*.json files
+CREATE TABLE IF NOT EXISTS terminal_worktrees (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,  -- Reference to project (not a foreign key - projects in global DB)
+  name TEXT NOT NULL,  -- Unique worktree name (used as directory name)
+  worktree_path TEXT NOT NULL,  -- Path to the worktree directory
+  branch_name TEXT,  -- Git branch name (terminal/{name}) - empty/null if no branch created
+  base_branch TEXT NOT NULL,  -- Base branch the worktree was created from
+  has_git_branch INTEGER NOT NULL DEFAULT 0,  -- Boolean: whether a git branch was created
+  task_id TEXT,  -- Associated task ID (optional)
+  terminal_id TEXT,  -- Terminal ID this worktree is associated with
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(project_id, name)  -- Name must be unique within a project
+);
+
+-- ============================================
 -- Indexes for Query Optimization
 -- ============================================
 
@@ -469,6 +489,11 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_subtask ON task_logs(subtask_id);
 CREATE INDEX IF NOT EXISTS idx_task_logs_type ON task_logs(log_type);
 CREATE INDEX IF NOT EXISTS idx_task_logs_timestamp ON task_logs(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_task_logs_session ON task_logs(session_id);
+
+-- Terminal worktrees indexes
+CREATE INDEX IF NOT EXISTS idx_terminal_worktrees_project ON terminal_worktrees(project_id);
+CREATE INDEX IF NOT EXISTS idx_terminal_worktrees_name ON terminal_worktrees(name);
+CREATE INDEX IF NOT EXISTS idx_terminal_worktrees_task ON terminal_worktrees(task_id);
 
 -- ============================================
 -- Triggers for Event System
@@ -644,7 +669,7 @@ END;
 -- ============================================
 
 -- Schema version metadata
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '006');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '007');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_type', 'project-local');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('last_migration', datetime('now'));

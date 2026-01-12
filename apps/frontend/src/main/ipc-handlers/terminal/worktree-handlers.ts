@@ -7,7 +7,7 @@ import type {
   TerminalWorktreeResult,
 } from '../../../shared/types';
 import path from 'path';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, readFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { minimatch } from 'minimatch';
 import { debugLog, debugError } from '../../../shared/utils/debug-logger';
@@ -16,9 +16,8 @@ import { parseEnvFile } from '../utils';
 import {
   getTerminalWorktreeDir,
   getTerminalWorktreePath,
-  getTerminalWorktreeMetadataDir,
-  getTerminalWorktreeMetadataPath,
 } from '../../worktree-paths';
+import { getProjectDatabaseManager } from '../../database';
 
 // Shared validation regex for worktree names - lowercase alphanumeric with dashes/underscores
 // Must start and end with alphanumeric character
@@ -193,47 +192,125 @@ function getDefaultBranch(projectPath: string): string {
   }
 }
 
-function saveWorktreeConfig(projectPath: string, name: string, config: TerminalWorktreeConfig): void {
-  const metadataDir = getTerminalWorktreeMetadataDir(projectPath);
-  mkdirSync(metadataDir, { recursive: true });
-  const metadataPath = getTerminalWorktreeMetadataPath(projectPath, name);
-  writeFileSync(metadataPath, JSON.stringify(config, null, 2));
+/**
+ * Get project ID from project path
+ */
+function getProjectId(projectPath: string): string | null {
+  const project = projectStore.getProjects().find(p => p.path === projectPath);
+  return project?.id || null;
 }
 
+/**
+ * Save worktree config to SQLite database
+ */
+function saveWorktreeConfig(projectPath: string, name: string, config: TerminalWorktreeConfig): void {
+  const projectId = getProjectId(projectPath);
+  if (!projectId) {
+    debugError('[TerminalWorktree] Cannot save config - project not found:', projectPath);
+    return;
+  }
+
+  try {
+    const dbManager = getProjectDatabaseManager();
+    const conn = dbManager.getConnection(projectPath);
+    const db = conn.getConnection();
+
+    const stmt = db.prepare(`
+      INSERT OR REPLACE INTO terminal_worktrees
+      (project_id, name, worktree_path, branch_name, base_branch, has_git_branch, task_id, terminal_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      projectId,
+      config.name,
+      config.worktreePath,
+      config.branchName || null,
+      config.baseBranch,
+      config.hasGitBranch ? 1 : 0,
+      config.taskId || null,
+      config.terminalId || null,
+      config.createdAt
+    );
+
+    debugLog('[TerminalWorktree] Saved config to SQLite:', name);
+  } catch (error) {
+    debugError('[TerminalWorktree] Failed to save config to SQLite:', error);
+  }
+}
+
+/**
+ * Load worktree config from SQLite database
+ */
 function loadWorktreeConfig(projectPath: string, name: string): TerminalWorktreeConfig | null {
-  // Check new metadata location first
-  const metadataPath = getTerminalWorktreeMetadataPath(projectPath, name);
-  if (existsSync(metadataPath)) {
-    try {
-      return JSON.parse(readFileSync(metadataPath, 'utf-8'));
-    } catch (error) {
-      debugError('[TerminalWorktree] Corrupted config at:', metadataPath, error);
-      return null;
-    }
+  const projectId = getProjectId(projectPath);
+  if (!projectId) {
+    return null;
   }
 
-  // Backwards compatibility: check legacy location inside worktree
-  const legacyConfigPath = path.join(getTerminalWorktreePath(projectPath, name), 'config.json');
-  if (existsSync(legacyConfigPath)) {
-    try {
-      const config = JSON.parse(readFileSync(legacyConfigPath, 'utf-8'));
-      // Migrate to new location
-      saveWorktreeConfig(projectPath, name, config);
-      // Clean up legacy file
-      try {
-        rmSync(legacyConfigPath);
-        debugLog('[TerminalWorktree] Migrated config from legacy location:', name);
-      } catch {
-        debugLog('[TerminalWorktree] Could not remove legacy config:', legacyConfigPath);
-      }
-      return config;
-    } catch (error) {
-      debugError('[TerminalWorktree] Corrupted legacy config at:', legacyConfigPath, error);
-      return null;
+  try {
+    const dbManager = getProjectDatabaseManager();
+    const conn = dbManager.getConnection(projectPath);
+    const db = conn.getConnection();
+
+    const row = db.prepare(`
+      SELECT name, worktree_path, branch_name, base_branch, has_git_branch, task_id, terminal_id, created_at
+      FROM terminal_worktrees
+      WHERE project_id = ? AND name = ?
+    `).get(projectId, name) as {
+      name: string;
+      worktree_path: string;
+      branch_name: string | null;
+      base_branch: string;
+      has_git_branch: number;
+      task_id: string | null;
+      terminal_id: string | null;
+      created_at: string;
+    } | undefined;
+
+    if (row) {
+      return {
+        name: row.name,
+        worktreePath: row.worktree_path,
+        branchName: row.branch_name || '',
+        baseBranch: row.base_branch,
+        hasGitBranch: row.has_git_branch === 1,
+        taskId: row.task_id || undefined,
+        terminalId: row.terminal_id || undefined,
+        createdAt: row.created_at,
+      };
     }
+
+    return null;
+  } catch (error) {
+    debugError('[TerminalWorktree] Failed to load config from SQLite:', error);
+    return null;
+  }
+}
+
+/**
+ * Delete worktree config from SQLite database
+ */
+function deleteWorktreeConfig(projectPath: string, name: string): boolean {
+  const projectId = getProjectId(projectPath);
+  if (!projectId) {
+    return false;
   }
 
-  return null;
+  try {
+    const dbManager = getProjectDatabaseManager();
+    const conn = dbManager.getConnection(projectPath);
+    const db = conn.getConnection();
+
+    const result = db.prepare(`
+      DELETE FROM terminal_worktrees WHERE project_id = ? AND name = ?
+    `).run(projectId, name);
+
+    return result.changes > 0;
+  } catch (error) {
+    debugError('[TerminalWorktree] Failed to delete config from SQLite:', error);
+    return false;
+  }
 }
 
 async function createTerminalWorktree(
@@ -403,46 +480,46 @@ async function listTerminalWorktrees(projectPath: string): Promise<TerminalWorkt
     return [];
   }
 
-  const configs: TerminalWorktreeConfig[] = [];
-  const seenNames = new Set<string>();
-
-  // Scan new metadata directory
-  const metadataDir = getTerminalWorktreeMetadataDir(projectPath);
-  if (existsSync(metadataDir)) {
-    try {
-      for (const file of readdirSync(metadataDir, { withFileTypes: true })) {
-        if (file.isFile() && file.name.endsWith('.json')) {
-          const name = file.name.replace('.json', '');
-          const config = loadWorktreeConfig(projectPath, name);
-          if (config) {
-            configs.push(config);
-            seenNames.add(name);
-          }
-        }
-      }
-    } catch (error) {
-      debugError('[TerminalWorktree] Error scanning metadata dir:', error);
-    }
+  const projectId = getProjectId(projectPath);
+  if (!projectId) {
+    return [];
   }
 
-  // Also scan worktree directory for legacy configs (will be migrated on load)
-  const worktreeDir = getTerminalWorktreeDir(projectPath);
-  if (existsSync(worktreeDir)) {
-    try {
-      for (const dir of readdirSync(worktreeDir, { withFileTypes: true })) {
-        if (dir.isDirectory() && !seenNames.has(dir.name)) {
-          const config = loadWorktreeConfig(projectPath, dir.name);
-          if (config) {
-            configs.push(config);
-          }
-        }
-      }
-    } catch (error) {
-      debugError('[TerminalWorktree] Error scanning worktree dir:', error);
-    }
-  }
+  try {
+    const dbManager = getProjectDatabaseManager();
+    const conn = dbManager.getConnection(projectPath);
+    const db = conn.getConnection();
 
-  return configs;
+    const rows = db.prepare(`
+      SELECT name, worktree_path, branch_name, base_branch, has_git_branch, task_id, terminal_id, created_at
+      FROM terminal_worktrees
+      WHERE project_id = ?
+      ORDER BY created_at DESC
+    `).all(projectId) as Array<{
+      name: string;
+      worktree_path: string;
+      branch_name: string | null;
+      base_branch: string;
+      has_git_branch: number;
+      task_id: string | null;
+      terminal_id: string | null;
+      created_at: string;
+    }>;
+
+    return rows.map(row => ({
+      name: row.name,
+      worktreePath: row.worktree_path,
+      branchName: row.branch_name || '',
+      baseBranch: row.base_branch,
+      hasGitBranch: row.has_git_branch === 1,
+      taskId: row.task_id || undefined,
+      terminalId: row.terminal_id || undefined,
+      createdAt: row.created_at,
+    }));
+  } catch (error) {
+    debugError('[TerminalWorktree] Failed to list worktrees from SQLite:', error);
+    return [];
+  }
 }
 
 async function removeTerminalWorktree(
@@ -502,16 +579,9 @@ async function removeTerminalWorktree(
       }
     }
 
-    // Remove metadata file
-    const metadataPath = getTerminalWorktreeMetadataPath(projectPath, name);
-    if (existsSync(metadataPath)) {
-      try {
-        rmSync(metadataPath);
-        debugLog('[TerminalWorktree] Removed metadata file:', metadataPath);
-      } catch {
-        debugLog('[TerminalWorktree] Could not remove metadata file:', metadataPath);
-      }
-    }
+    // Remove config from SQLite database
+    deleteWorktreeConfig(projectPath, name);
+    debugLog('[TerminalWorktree] Removed config from database:', name);
 
     return { success: true };
   } catch (error) {
