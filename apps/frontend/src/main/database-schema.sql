@@ -10,9 +10,11 @@
 -- - Tasks, projects, and metadata tables
 -- - Event queue for IPC notification system
 -- - Task history table for audit logging (Phase 4A)
+-- - FTS5 virtual table for full-text search (Phase 4B)
 -- - Indexes for query optimization (<100ms latency)
 -- - Triggers for automatic event emission on data changes
 -- - Triggers for automatic task history recording
+-- - Triggers for FTS5 index synchronization
 -- - Foreign key constraints for data integrity
 --
 -- Database: tasks.db
@@ -95,6 +97,21 @@ CREATE TABLE IF NOT EXISTS task_history (
   timestamp TEXT NOT NULL DEFAULT (datetime('now')),
   session_id TEXT,
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+-- ============================================
+-- Full-Text Search (Phase 4B)
+-- ============================================
+
+-- FTS5 Virtual Table for Task Search
+-- Indexes task title, description, and tags for full-text search
+-- NOTE: FTS5 tables do NOT support constraints, data types, or PRIMARY KEY
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+  title,
+  description,
+  tags,
+  content='tasks',
+  content_rowid='rowid'
 );
 
 -- ============================================
@@ -242,10 +259,67 @@ BEGIN
 END;
 
 -- ============================================
+-- Triggers for FTS5 Sync (Phase 4B)
+-- ============================================
+
+-- FTS5 INSERT trigger
+-- Syncs FTS index when a new task is inserted
+CREATE TRIGGER IF NOT EXISTS tasks_fts_insert
+AFTER INSERT ON tasks
+BEGIN
+  INSERT INTO tasks_fts(rowid, title, description, tags)
+  VALUES (
+    NEW.rowid,
+    NEW.title,
+    NEW.description,
+    json_extract(NEW.metadata_json, '$.tags')
+  );
+END;
+
+-- FTS5 UPDATE trigger
+-- Syncs FTS index when a task is updated
+-- NOTE: FTS5 does NOT support UPDATE, so we delete old entry and insert new one
+CREATE TRIGGER IF NOT EXISTS tasks_fts_update
+AFTER UPDATE ON tasks
+BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
+  VALUES (
+    'delete',
+    OLD.rowid,
+    OLD.title,
+    OLD.description,
+    json_extract(OLD.metadata_json, '$.tags')
+  );
+  INSERT INTO tasks_fts(rowid, title, description, tags)
+  VALUES (
+    NEW.rowid,
+    NEW.title,
+    NEW.description,
+    json_extract(NEW.metadata_json, '$.tags')
+  );
+END;
+
+-- FTS5 DELETE trigger
+-- Removes task from FTS index when task is deleted
+-- NOTE: Uses special 'delete' command for contentless FTS5 tables
+CREATE TRIGGER IF NOT EXISTS tasks_fts_delete
+AFTER DELETE ON tasks
+BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags)
+  VALUES (
+    'delete',
+    OLD.rowid,
+    OLD.title,
+    OLD.description,
+    json_extract(OLD.metadata_json, '$.tags')
+  );
+END;
+
+-- ============================================
 -- Initial Data
 -- ============================================
 
 -- Schema version metadata
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '002');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '003');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('last_migration', datetime('now'));
