@@ -5,6 +5,7 @@ import {
   initializeProject
 } from '../../../stores/project-store';
 import { checkGitHubConnection as checkGitHubConnectionGlobal } from '../../../stores/github';
+import { DEFAULT_PROJECT_SETTINGS } from '../../../../shared/constants';
 import type {
   Project,
   ProjectSettings as ProjectSettingsType,
@@ -14,6 +15,22 @@ import type {
   GitHubSyncStatus,
   GitLabSyncStatus
 } from '../../../../shared/types';
+
+/**
+ * Merges project settings with defaults to ensure all nested properties exist.
+ * This handles cases where projects created before new settings fields were added
+ * might be missing those fields.
+ */
+function mergeWithDefaults(settings: ProjectSettingsType): ProjectSettingsType {
+  return {
+    ...DEFAULT_PROJECT_SETTINGS,
+    ...settings,
+    notifications: {
+      ...DEFAULT_PROJECT_SETTINGS.notifications,
+      ...(settings.notifications || {}),
+    },
+  };
+}
 
 export interface UseProjectSettingsReturn {
   // Settings state
@@ -83,7 +100,7 @@ export function useProjectSettings(
   project: Project,
   open: boolean
 ): UseProjectSettingsReturn {
-  const [settings, setSettings] = useState<ProjectSettingsType>(project.settings);
+  const [settings, setSettings] = useState<ProjectSettingsType>(mergeWithDefaults(project.settings));
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [versionInfo, setVersionInfo] = useState<AutoBuildVersionInfo | null>(null);
@@ -130,7 +147,7 @@ export function useProjectSettings(
 
   // Reset settings when project changes
   useEffect(() => {
-    setSettings(project.settings);
+    setSettings(mergeWithDefaults(project.settings));
   }, [project]);
 
   // Check version when dialog opens
