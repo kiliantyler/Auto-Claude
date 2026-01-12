@@ -37,6 +37,8 @@ import { setupErrorLogging } from './app-logger';
 import { initSentryMain } from './sentry';
 import { preWarmToolCache } from './cli-tool-manager';
 import { initializeClaudeProfileManager } from './claude-profile-manager';
+import { getDatabaseConnection, closeDatabaseConnection } from './database';
+import { getDatabaseEventPoller, stopDatabaseEventPoller } from './database-event-poller';
 import type { AppSettings } from '../shared/types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,6 +96,53 @@ function cleanupStaleUpdateMetadata(): void {
         console.warn(`[main] Failed to clean up stale metadata at ${stalePath}:`, e);
       }
     }
+  }
+}
+
+/**
+ * Initialize SQLite database and create schema.
+ *
+ * Creates the database file at userData/.auto-claude/tasks.db and executes
+ * the schema SQL to set up tables, indexes, and triggers.
+ */
+function initializeDatabase(): void {
+  try {
+    // Get database connection (creates file if it doesn't exist)
+    const dbConn = getDatabaseConnection();
+    const db = dbConn.getConnection();
+
+    // Find schema SQL file
+    // In dev: __dirname is out/main, schema is at ../../src/main/database-schema.sql
+    // In prod: schema should be in the same directory as compiled JS
+    const possibleSchemaPaths = [
+      join(__dirname, 'database-schema.sql'),           // Production: alongside compiled JS
+      join(__dirname, '../../src/main/database-schema.sql'), // Development: from out/main to src
+    ];
+
+    let schemaSQL: string | null = null;
+    let schemaPath: string | null = null;
+
+    for (const path of possibleSchemaPaths) {
+      if (existsSync(path)) {
+        schemaSQL = readFileSync(path, 'utf-8');
+        schemaPath = path;
+        break;
+      }
+    }
+
+    if (!schemaSQL) {
+      throw new Error(`Could not find database-schema.sql in any of these locations: ${possibleSchemaPaths.join(', ')}`);
+    }
+
+    // Execute schema SQL (creates tables, indexes, triggers)
+    // SQLite exec() can run multiple statements separated by semicolons
+    db.exec(schemaSQL);
+
+    console.log(`[Database] Schema initialized from: ${schemaPath}`);
+    console.log(`[Database] Database ready at: ${dbConn.getPath()}`);
+  } catch (error: unknown) {
+    console.error('[Database] Failed to initialize database:', error);
+    throw error;
   }
 }
 
@@ -242,6 +291,31 @@ app.whenReady().then(() => {
   // Clean up stale update metadata from the old source updater system
   // This prevents version display desync after electron-updater installs a new version
   cleanupStaleUpdateMetadata();
+
+  // Initialize SQLite database and create schema
+  // Must be done early (before any IPC handlers that use the database)
+  initializeDatabase();
+
+  // Start database event poller for real-time updates
+  // Polls event_queue table and emits IPC events when tasks/projects change
+  const eventPoller = getDatabaseEventPoller();
+  eventPoller.start(100); // Poll every 100ms for <100ms update latency
+
+  // Forward database events to all renderer windows
+  eventPoller.on('event', (ipcEventName: string, entityId: string) => {
+    // Send to all windows (supports multi-window scenarios)
+    const windows = BrowserWindow.getAllWindows();
+    for (const window of windows) {
+      window.webContents.send(ipcEventName, entityId);
+    }
+  });
+
+  // Log any poller errors
+  eventPoller.on('error', (error: string) => {
+    console.error('[DatabaseEventPoller]', error);
+  });
+
+  console.log('[main] Database event poller started');
 
   // Set dock icon on macOS
   if (process.platform === 'darwin') {
@@ -429,6 +503,13 @@ app.on('before-quit', async () => {
   const usageMonitor = getUsageMonitor();
   usageMonitor.stop();
   console.warn('[main] Usage monitor stopped');
+
+  // Stop database event poller before closing connection
+  stopDatabaseEventPoller();
+  console.warn('[main] Database event poller stopped');
+
+  // Close database connection
+  closeDatabaseConnection();
 
   // Kill all running agent processes
   if (agentManager) {

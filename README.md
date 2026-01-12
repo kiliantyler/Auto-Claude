@@ -123,6 +123,45 @@ Auto-Claude/
 
 ---
 
+## Database Architecture
+
+Auto Claude uses SQLite for task and project storage, providing instant UI updates (<100ms latency) and transaction safety.
+
+### Database Location
+- **Path:** `<userData>/.auto-claude/tasks.db` (platform-specific user data directory)
+- **Engine:** better-sqlite3 (synchronous API optimized for Electron)
+- **Mode:** WAL (Write-Ahead Logging) for concurrent read/write performance
+
+### Schema
+| Table | Description |
+|-------|-------------|
+| **tasks** | Task records with status, metadata, subtasks, QA reports, execution logs |
+| **projects** | Project metadata (name, path, settings) |
+| **metadata** | Application-level settings and schema versioning |
+| **event_queue** | Buffer for real-time IPC events triggered by database changes |
+
+### Real-Time Updates
+Database triggers automatically populate the `event_queue` table on INSERT/UPDATE/DELETE operations. A 100ms polling interval emits IPC events (`db:task:updated`, `db:project:created`, etc.) for instant UI synchronization across all windows.
+
+### Backup & Recovery
+
+**Export tasks to JSON:**
+```bash
+# Via UI: Settings → Export Tasks
+# Creates backup at: .auto-claude/backups/tasks-{timestamp}.json
+```
+
+**Import from JSON backup:**
+```bash
+# Via UI: Settings → Import Tasks
+# Restores tasks from exported JSON file
+```
+
+**Emergency recovery:**
+If database corruption occurs, use the export/import functionality to restore from the most recent JSON backup. The application will recreate the database schema automatically on next startup.
+
+---
+
 ## CLI Usage
 
 For headless operation, CI/CD integration, or terminal-only workflows:
@@ -150,6 +189,32 @@ See [guides/CLI-USAGE.md](guides/CLI-USAGE.md) for complete CLI documentation.
 Want to build from source or contribute? See [CONTRIBUTING.md](CONTRIBUTING.md) for complete development setup instructions.
 
 For Linux-specific builds (Flatpak, AppImage), see [guides/linux.md](guides/linux.md).
+
+### Database Setup (Development)
+
+Auto Claude uses **better-sqlite3** for native SQLite support in Electron. After installing dependencies:
+
+```bash
+cd apps/frontend
+
+# Install dependencies
+npm install
+
+# Rebuild native modules for Electron
+npm run rebuild
+
+# Start development mode
+npm run dev
+```
+
+**Important:** Run `npm run rebuild` after every `npm install` to ensure better-sqlite3 is compiled for the correct Electron version.
+
+**Environment Variables:**
+```bash
+# .env (optional)
+ENABLE_DUAL_WRITE=false  # Default: SQLite-only mode (Phase 4)
+                         # Set to true for dual-write (SQLite + JSON)
+```
 
 ---
 

@@ -63,7 +63,7 @@ function runElectronRebuild() {
   return new Promise((resolve, reject) => {
     const npx = isWindows ? 'npx.cmd' : 'npx';
     const electronVersion = getElectronVersion();
-    const args = ['electron-rebuild'];
+    const args = ['electron-rebuild', '-f', '-w', 'better-sqlite3'];
 
     // Explicitly pass electron version if detected
     if (electronVersion) {
@@ -130,13 +130,34 @@ function isNodePtyBuilt() {
 }
 
 /**
+ * Check if better-sqlite3 is already built
+ */
+function isBetterSqlite3Built() {
+  // Check local node_modules
+  const localBuildDir = path.join(__dirname, '..', 'node_modules', 'better-sqlite3', 'build', 'Release');
+  if (fs.existsSync(localBuildDir)) {
+    const files = fs.readdirSync(localBuildDir);
+    if (files.some((f) => f.endsWith('.node'))) return true;
+  }
+
+  // Check root node_modules (for pnpm/yarn workspaces)
+  const rootBuildDir = path.join(__dirname, '..', '..', '..', 'node_modules', 'better-sqlite3', 'build', 'Release');
+  if (fs.existsSync(rootBuildDir)) {
+    const files = fs.readdirSync(rootBuildDir);
+    if (files.some((f) => f.endsWith('.node'))) return true;
+  }
+
+  return false;
+}
+
+/**
  * Main postinstall logic
  */
 async function main() {
   console.log('[postinstall] Setting up native modules for Electron...\n');
 
-  // If node-pty is already built (e.g., from a previous successful install), skip
-  if (isNodePtyBuilt()) {
+  // If both node-pty and better-sqlite3 are already built, skip rebuild
+  if (isNodePtyBuilt() && isBetterSqlite3Built()) {
     console.log('[postinstall] Native modules already built, skipping rebuild.');
     return;
   }

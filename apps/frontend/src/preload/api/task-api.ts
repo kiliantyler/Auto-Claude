@@ -69,6 +69,11 @@ export interface TaskAPI {
     callback: (taskId: string, progress: import('../../shared/types').ExecutionProgress, projectId?: string) => void
   ) => () => void;
 
+  // Database events (triggered by SQLite changes)
+  onDatabaseTaskCreated: (callback: (taskId: string) => void) => () => void;
+  onDatabaseTaskUpdated: (callback: (taskId: string) => void) => () => void;
+  onDatabaseTaskDeleted: (callback: (taskId: string) => void) => () => void;
+
   // Task Phase Logs
   getTaskLogs: (projectId: string, specId: string) => Promise<IPCResult<TaskLogs | null>>;
   watchTaskLogs: (projectId: string, specId: string) => Promise<IPCResult>;
@@ -247,6 +252,52 @@ export const createTaskAPI = (): TaskAPI => ({
     ipcRenderer.on(IPC_CHANNELS.TASK_EXECUTION_PROGRESS, handler);
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.TASK_EXECUTION_PROGRESS, handler);
+    };
+  },
+
+  // Database events (triggered by SQLite changes)
+  onDatabaseTaskCreated: (
+    callback: (taskId: string) => void
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      taskId: string
+    ): void => {
+      callback(taskId);
+    };
+    ipcRenderer.on(IPC_CHANNELS.DB_TASK_CREATED, handler);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.DB_TASK_CREATED, handler);
+    };
+  },
+
+  onDatabaseTaskUpdated: (
+    callback: (taskId: string) => void
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      taskId: string
+    ): void => {
+      callback(taskId);
+    };
+    ipcRenderer.on(IPC_CHANNELS.DB_TASK_UPDATED, handler);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.DB_TASK_UPDATED, handler);
+    };
+  },
+
+  onDatabaseTaskDeleted: (
+    callback: (taskId: string) => void
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      taskId: string
+    ): void => {
+      callback(taskId);
+    };
+    ipcRenderer.on(IPC_CHANNELS.DB_TASK_DELETED, handler);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.DB_TASK_DELETED, handler);
     };
   },
 

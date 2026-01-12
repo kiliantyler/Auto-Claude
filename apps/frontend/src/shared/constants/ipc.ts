@@ -28,6 +28,8 @@ export const IPC_CHANNELS = {
   TASK_UPDATE_STATUS: 'task:updateStatus',
   TASK_RECOVER_STUCK: 'task:recoverStuck',
   TASK_CHECK_RUNNING: 'task:checkRunning',
+  TASK_EXPORT: 'task:export',  // Export tasks to JSON backup
+  TASK_IMPORT: 'task:import',  // Import tasks from JSON backup
 
   // Workspace management (for human review)
   // Per-spec architecture: Each spec has its own worktree at .worktrees/{spec-name}/
@@ -49,6 +51,11 @@ export const IPC_CHANNELS = {
   TASK_LOG: 'task:log',
   TASK_STATUS_CHANGE: 'task:statusChange',
   TASK_EXECUTION_PROGRESS: 'task:executionProgress',
+
+  // Database events (main -> renderer) - from SQLite triggers
+  DB_TASK_CREATED: 'db:task:created',
+  DB_TASK_UPDATED: 'db:task:updated',
+  DB_TASK_DELETED: 'db:task:deleted',
 
   // Task phase logs (persistent, collapsible logs by phase)
   TASK_LOGS_GET: 'task:logsGet',           // Load logs from spec dir

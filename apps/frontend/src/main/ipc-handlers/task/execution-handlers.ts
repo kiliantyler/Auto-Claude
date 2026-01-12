@@ -6,7 +6,6 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 
 import { rm } from 'fs/promises';
 import { spawnSync, execFileSync } from 'child_process';
 import { AgentManager } from '../../agent';
-import { fileWatcher } from '../../file-watcher';
 import { findTaskAndProject } from './shared';
 import { checkGitStatus } from '../../project-initializer';
 import { getClaudeProfileManager } from '../../claude-profile-manager';
@@ -18,6 +17,7 @@ import {
 import { findTaskWorktree } from '../../worktree-paths';
 import { projectStore } from '../../project-store';
 import { getToolPath } from '../../cli-tool-manager';
+import { getTaskStorage } from '../../task-storage';
 
 /**
  * Atomic file write to prevent TOCTOU race conditions.
@@ -156,7 +156,6 @@ export function registerTaskExecutionHandlers(
       const worktreeSpecDir = worktreePath
         ? path.join(worktreePath, specsBaseDir, task.specId)
         : undefined;
-      fileWatcher.watch(taskId, specDir, worktreeSpecDir);
 
       // Check if spec.md exists (indicates spec creation was already done or in progress)
       const specFilePath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -261,6 +260,17 @@ export function registerTaskExecutionHandlers(
         } catch (err) {
           console.error('[TASK_START] Failed to persist plan status:', err);
         }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: 'in_progress' });
+          if (DEBUG) {
+            console.log(`[TASK_START] Updated task status in database: in_progress`);
+          }
+        } catch (dbErr) {
+          console.error('[TASK_START] Failed to update task status in database:', dbErr);
+        }
       });
       // Note: Plan file may not exist yet for new tasks - that's fine (persistPlanStatus handles ENOENT)
     }
@@ -273,7 +283,6 @@ export function registerTaskExecutionHandlers(
     const DEBUG = process.env.DEBUG === 'true';
 
     agentManager.killTask(taskId);
-    fileWatcher.unwatch(taskId);
 
     // Notify status change IMMEDIATELY for instant UI feedback
     const ipcSentAt = Date.now();
@@ -422,6 +431,17 @@ export function registerTaskExecutionHandlers(
                 }
               }
             }
+
+            // Dual-write: Update status in SQLite database
+            try {
+              const storage = getTaskStorage();
+              storage.updateTask(taskId, { status: 'backlog' });
+              if (DEBUG) {
+                console.log(`[TASK_STOP] Updated task status in database: backlog`);
+              }
+            } catch (dbErr) {
+              console.error('[TASK_STOP] Failed to update task status in database:', dbErr);
+            }
           }
 
           if (DEBUG) {
@@ -445,7 +465,6 @@ export function registerTaskExecutionHandlers(
 
     // First, stop the task if running
     agentManager.killTask(taskId);
-    fileWatcher.unwatch(taskId);
 
     const { task, project } = findTaskAndProject(taskId);
 
@@ -565,6 +584,17 @@ export function registerTaskExecutionHandlers(
         );
       }
 
+      // Dual-write: Update status in SQLite database
+      try {
+        const storage = getTaskStorage();
+        storage.updateTask(taskId, { status: 'backlog' });
+        if (DEBUG) {
+          console.log(`[TASK_RESET] Updated task status in database: backlog`);
+        }
+      } catch (dbErr) {
+        console.error('[TASK_RESET] Failed to update task status in database:', dbErr);
+      }
+
       // 4. Clear execution progress
       if (mainWindow) {
         mainWindow.webContents.send(
@@ -641,6 +671,15 @@ export function registerTaskExecutionHandlers(
             'done'
           );
         }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: 'done' });
+          console.debug(`[TASK_REVIEW] Updated task status in database: done`);
+        } catch (dbErr) {
+          console.error('[TASK_REVIEW] Failed to update task status in database:', dbErr);
+        }
       } else {
         // Reset and discard all changes from worktree merge in main
         // The worktree still has all changes, so nothing is lost
@@ -710,6 +749,15 @@ export function registerTaskExecutionHandlers(
             taskId,
             'in_progress'
           );
+        }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: 'in_progress' });
+          console.debug(`[TASK_REVIEW] Updated task status in database: in_progress`);
+        } catch (dbErr) {
+          console.error('[TASK_REVIEW] Failed to update task status in database:', dbErr);
         }
       }
 
@@ -848,7 +896,6 @@ export function registerTaskExecutionHandlers(
           const worktreeSpecDirForUpdate = worktreePathForUpdate
             ? path.join(worktreePathForUpdate, specsBaseDir, task.specId)
             : undefined;
-          fileWatcher.watch(taskId, specDir, worktreeSpecDirForUpdate);
 
           // Check if spec.md exists
           const specFilePath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -907,6 +954,15 @@ export function registerTaskExecutionHandlers(
               'in_progress'
             );
           }
+        }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status });
+          console.debug(`[TASK_UPDATE_STATUS] Updated task status in database: ${status}`);
+        } catch (dbErr) {
+          console.error('[TASK_UPDATE_STATUS] Failed to update task status in database:', dbErr);
         }
 
         return { success: true };
@@ -1217,9 +1273,6 @@ export function registerTaskExecutionHandlers(
           }
         }
 
-        // Stop file watcher if it was watching this task
-        fileWatcher.unwatch(taskId);
-
         // Auto-restart the task if requested
         let autoRestarted = false;
         if (autoRestart && project) {
@@ -1287,7 +1340,6 @@ export function registerTaskExecutionHandlers(
             const worktreeSpecDirForRecovery = worktreePathForRecovery
               ? path.join(worktreePathForRecovery, specsBaseDir, task.specId)
               : undefined;
-            fileWatcher.watch(taskId, specDirForWatcher, worktreeSpecDirForRecovery);
 
             // Check if spec.md exists to determine whether to run spec creation or task execution
             const specFilePath = path.join(specDirForWatcher, AUTO_BUILD_PATHS.SPEC_FILE);
@@ -1335,6 +1387,15 @@ export function registerTaskExecutionHandlers(
             taskId,
             newStatus
           );
+        }
+
+        // Dual-write: Update status in SQLite database
+        try {
+          const storage = getTaskStorage();
+          storage.updateTask(taskId, { status: newStatus });
+          console.debug(`[TASK_RECOVER_STUCK] Updated task status in database: ${newStatus}`);
+        } catch (dbErr) {
+          console.error('[TASK_RECOVER_STUCK] Failed to update task status in database:', dbErr);
         }
 
         return {

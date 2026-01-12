@@ -6,6 +6,7 @@ import type { Project, ProjectSettings, Task, TaskStatus, TaskMetadata, Implemen
 import { DEFAULT_PROJECT_SETTINGS, AUTO_BUILD_PATHS, getSpecsDir } from '../shared/constants';
 import { getAutoBuildPath, isInitialized } from './project-initializer';
 import { getTaskWorktreeDir } from './worktree-paths';
+import { getDatabaseConnection } from './database';
 
 interface TabState {
   openProjectIds: string[];
@@ -32,6 +33,7 @@ export class ProjectStore {
   private data: StoreData;
   private tasksCache: Map<string, TasksCacheEntry> = new Map();
   private readonly CACHE_TTL_MS = 3000; // 3 seconds TTL for task cache
+  private readonly ENABLE_DUAL_WRITE: boolean;
 
   constructor() {
     // Store in app's userData directory
@@ -45,6 +47,11 @@ export class ProjectStore {
 
     this.storePath = path.join(storeDir, 'projects.json');
     this.data = this.load();
+
+    // Enable dual-write by default (Phase 1 migration strategy)
+    // Set ENABLE_DUAL_WRITE=false to use SQLite-only mode
+    this.ENABLE_DUAL_WRITE = process.env.ENABLE_DUAL_WRITE !== 'false';
+    console.log(`[ProjectStore] Dual-write mode: ${this.ENABLE_DUAL_WRITE ? 'ENABLED' : 'DISABLED'}`);
   }
 
   /**
@@ -77,6 +84,81 @@ export class ProjectStore {
   }
 
   /**
+   * Write project to SQLite database
+   * Used by dual-write system to keep database in sync with JSON files
+   */
+  private writeProjectToDatabase(project: Project): void {
+    try {
+      const db = getDatabaseConnection().getConnection();
+      const stmt = db.prepare(`
+        INSERT OR REPLACE INTO projects (id, name, path, auto_build_path, settings_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      stmt.run(
+        project.id,
+        project.name,
+        project.path,
+        project.autoBuildPath,
+        JSON.stringify(project.settings),
+        project.createdAt.toISOString(),
+        project.updatedAt.toISOString()
+      );
+    } catch (error) {
+      console.error('[ProjectStore] Failed to write project to database:', error);
+      // Don't throw - dual-write should not block if database fails
+    }
+  }
+
+  /**
+   * Delete project from SQLite database
+   * Used by dual-write system to keep database in sync with JSON files
+   */
+  private deleteProjectFromDatabase(projectId: string): void {
+    try {
+      const db = getDatabaseConnection().getConnection();
+      const stmt = db.prepare('DELETE FROM projects WHERE id = ?');
+      stmt.run(projectId);
+    } catch (error) {
+      console.error('[ProjectStore] Failed to delete project from database:', error);
+      // Don't throw - dual-write should not block if database fails
+    }
+  }
+
+  /**
+   * Read projects from SQLite database
+   * Used by read operations to query database instead of JSON
+   */
+  private readProjectsFromDatabase(): Project[] {
+    try {
+      const db = getDatabaseConnection().getConnection();
+      const stmt = db.prepare('SELECT * FROM projects ORDER BY updated_at DESC');
+      const rows = stmt.all() as Array<{
+        id: string;
+        name: string;
+        path: string;
+        auto_build_path: string;
+        settings_json: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+
+      return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        path: row.path,
+        autoBuildPath: row.auto_build_path,
+        settings: JSON.parse(row.settings_json),
+        createdAt: new Date(row.created_at),
+        updatedAt: new Date(row.updated_at)
+      }));
+    } catch (error) {
+      console.error('[ProjectStore] Failed to read projects from database:', error);
+      return [];
+    }
+  }
+
+  /**
    * Add a new project
    */
   addProject(projectPath: string, name?: string): Project {
@@ -89,7 +171,14 @@ export class ProjectStore {
         console.warn(`[ProjectStore] .auto-claude folder was deleted for project "${existing.name}" - resetting autoBuildPath`);
         existing.autoBuildPath = '';
         existing.updatedAt = new Date();
-        this.save();
+
+        // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
+        if (this.ENABLE_DUAL_WRITE) {
+          this.save();
+          this.writeProjectToDatabase(existing);
+        } else {
+          this.writeProjectToDatabase(existing);
+        }
       }
       return existing;
     }
@@ -110,8 +199,14 @@ export class ProjectStore {
       updatedAt: new Date()
     };
 
+    // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
     this.data.projects.push(project);
-    this.save();
+    if (this.ENABLE_DUAL_WRITE) {
+      this.save();
+      this.writeProjectToDatabase(project);
+    } else {
+      this.writeProjectToDatabase(project);
+    }
 
     return project;
   }
@@ -124,7 +219,14 @@ export class ProjectStore {
     if (project) {
       project.autoBuildPath = autoBuildPath;
       project.updatedAt = new Date();
-      this.save();
+
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
+      if (this.ENABLE_DUAL_WRITE) {
+        this.save();
+        this.writeProjectToDatabase(project);
+      } else {
+        this.writeProjectToDatabase(project);
+      }
     }
     return project;
   }
@@ -136,7 +238,14 @@ export class ProjectStore {
     const index = this.data.projects.findIndex((p) => p.id === projectId);
     if (index !== -1) {
       this.data.projects.splice(index, 1);
-      this.save();
+
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
+      if (this.ENABLE_DUAL_WRITE) {
+        this.save();
+        this.deleteProjectFromDatabase(projectId);
+      } else {
+        this.deleteProjectFromDatabase(projectId);
+      }
       return true;
     }
     return false;
@@ -144,9 +253,24 @@ export class ProjectStore {
 
   /**
    * Get all projects
+   * Reads from SQLite database (with fallback to JSON for safety during migration)
    */
   getProjects(): Project[] {
-    return this.data.projects;
+    if (this.ENABLE_DUAL_WRITE) {
+      // Phase 1: Read from SQLite with fallback to JSON
+      const dbProjects = this.readProjectsFromDatabase();
+      if (dbProjects.length > 0) {
+        // Update in-memory cache with database data for consistency
+        this.data.projects = dbProjects;
+        return dbProjects;
+      }
+      // Fallback to JSON if database is empty or has errors
+      console.warn('[ProjectStore] Database is empty, falling back to JSON');
+      return this.data.projects;
+    } else {
+      // Phase 2+: JSON files are still maintained as backup
+      return this.data.projects;
+    }
   }
 
   /**
@@ -211,7 +335,19 @@ export class ProjectStore {
     }
 
     if (hasChanges) {
-      this.save();
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
+      if (this.ENABLE_DUAL_WRITE) {
+        this.save();
+      }
+
+      // Update all modified projects in database
+      for (const projectId of resetProjectIds) {
+        const project = this.data.projects.find((p) => p.id === projectId);
+        if (project) {
+          this.writeProjectToDatabase(project);
+        }
+      }
+
       console.warn(`[ProjectStore] Reset ${resetProjectIds.length} project(s) due to missing .auto-claude folder`);
     }
 
@@ -236,14 +372,91 @@ export class ProjectStore {
     if (project) {
       project.settings = { ...project.settings, ...settings };
       project.updatedAt = new Date();
-      this.save();
+
+      // Write to storage (dual-write mode: both JSON + DB, SQLite-only mode: DB only)
+      if (this.ENABLE_DUAL_WRITE) {
+        this.save();
+        this.writeProjectToDatabase(project);
+      } else {
+        this.writeProjectToDatabase(project);
+      }
     }
     return project;
   }
 
   /**
-   * Get tasks for a project by scanning specs directory
-   * Implements caching with 3-second TTL to prevent excessive worktree scanning
+   * Read tasks from SQLite database
+   * Used by read operations to query database instead of scanning directories
+   */
+  private readTasksFromDatabase(projectId: string): Task[] {
+    try {
+      const db = getDatabaseConnection().getConnection();
+      const stmt = db.prepare('SELECT * FROM tasks WHERE project_id = ? ORDER BY updated_at DESC');
+      const rows = stmt.all(projectId) as Array<{
+        id: string;
+        spec_id: string;
+        project_id: string;
+        title: string;
+        description: string;
+        status: string;
+        review_reason: string | null;
+        released_in_version: string | null;
+        staged_in_main_project: number;
+        staged_at: string | null;
+        location: string | null;
+        specs_path: string | null;
+        metadata_json: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+
+      return rows.map((row) => {
+        // Parse metadata JSON
+        const metadataWithExtras = JSON.parse(row.metadata_json) as {
+          subtasks?: Task['subtasks'];
+          qaReport?: Task['qaReport'];
+          logs?: Task['logs'];
+          executionProgress?: Task['executionProgress'];
+          sourceType?: string;
+          archivedAt?: string;
+          archivedInVersion?: string;
+        };
+
+        // Extract nested fields from metadata JSON
+        const { subtasks, qaReport, logs, executionProgress, ...metadata } = metadataWithExtras;
+
+        return {
+          id: row.id,
+          specId: row.spec_id,
+          projectId: row.project_id,
+          title: row.title,
+          description: row.description,
+          status: row.status as TaskStatus,
+          reviewReason: row.review_reason as ReviewReason | undefined,
+          releasedInVersion: row.released_in_version || undefined,
+          stagedInMainProject: row.staged_in_main_project === 1,
+          stagedAt: row.staged_at || undefined,
+          location: row.location as 'main' | 'worktree' | undefined,
+          specsPath: row.specs_path || undefined,
+          subtasks: subtasks || [],
+          qaReport: qaReport,
+          logs: logs || [],
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+          executionProgress: executionProgress,
+          createdAt: new Date(row.created_at),
+          updatedAt: new Date(row.updated_at),
+        };
+      });
+    } catch (error) {
+      console.error('[ProjectStore] Failed to read tasks from database:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get tasks for a project from SQLite database
+   * Implements caching with 3-second TTL to prevent excessive database queries
+   * Falls back to directory scanning if database is empty (during migration)
    */
   getTasks(projectId: string): Task[] {
     // Check cache first
@@ -255,27 +468,56 @@ export class ProjectStore {
       return cached.tasks;
     }
 
-    console.warn('[ProjectStore] getTasks called with projectId:', projectId, cached ? '(cache expired)' : '(cache miss)');
+    console.debug('[ProjectStore] getTasks called with projectId:', projectId, cached ? '(cache expired)' : '(cache miss)');
     const project = this.getProject(projectId);
     if (!project) {
       console.warn('[ProjectStore] Project not found for id:', projectId);
       return [];
     }
-    console.warn('[ProjectStore] Found project:', project.name, 'autoBuildPath:', project.autoBuildPath);
 
+    let tasks: Task[] = [];
+
+    if (this.ENABLE_DUAL_WRITE) {
+      // Phase 1: Read from SQLite with fallback to directory scanning
+      const dbTasks = this.readTasksFromDatabase(projectId);
+      if (dbTasks.length > 0) {
+        tasks = dbTasks;
+        console.debug('[ProjectStore] Loaded', tasks.length, 'tasks from SQLite database');
+      } else {
+        // Fallback to directory scanning if database is empty
+        console.warn('[ProjectStore] Database is empty, falling back to directory scanning');
+        tasks = this.scanTasksFromDirectory(project, projectId);
+      }
+    } else {
+      // Phase 2+: Directory scanning still available as backup
+      console.debug('[ProjectStore] Using directory scanning (dual-write disabled)');
+      tasks = this.scanTasksFromDirectory(project, projectId);
+    }
+
+    // Update cache
+    this.tasksCache.set(projectId, { tasks, timestamp: now });
+
+    return tasks;
+  }
+
+  /**
+   * Scan tasks from directory (legacy method, kept for fallback during migration)
+   * This method scans the specs directory and worktrees to load tasks from JSON files
+   */
+  private scanTasksFromDirectory(project: Project, projectId: string): Task[] {
     const allTasks: Task[] = [];
     const specsBaseDir = getSpecsDir(project.autoBuildPath);
 
     // 1. Scan main project specs directory (source of truth for task existence)
     const mainSpecsDir = path.join(project.path, specsBaseDir);
     const mainSpecIds = new Set<string>();
-    console.warn('[ProjectStore] Main specsDir:', mainSpecsDir, 'exists:', existsSync(mainSpecsDir));
+    console.debug('[ProjectStore] Main specsDir:', mainSpecsDir, 'exists:', existsSync(mainSpecsDir));
     if (existsSync(mainSpecsDir)) {
       const mainTasks = this.loadTasksFromSpecsDir(mainSpecsDir, project.path, 'main', projectId, specsBaseDir);
       allTasks.push(...mainTasks);
       // Track which specs exist in main project
       mainTasks.forEach(t => mainSpecIds.add(t.specId));
-      console.warn('[ProjectStore] Loaded', mainTasks.length, 'tasks from main project');
+      console.debug('[ProjectStore] Loaded', mainTasks.length, 'tasks from main project');
     }
 
     // 2. Scan worktree specs directories
@@ -319,10 +561,7 @@ export class ProjectStore {
     }
 
     const tasks = Array.from(taskMap.values());
-    console.warn('[ProjectStore] Returning', tasks.length, 'unique tasks (after deduplication)');
-
-    // Update cache
-    this.tasksCache.set(projectId, { tasks, timestamp: now });
+    console.debug('[ProjectStore] Returning', tasks.length, 'unique tasks (after deduplication)');
 
     return tasks;
   }

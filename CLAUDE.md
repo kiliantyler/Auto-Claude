@@ -192,6 +192,14 @@ See [RELEASE.md](RELEASE.md) for detailed release process documentation.
 - **context/project_analyzer.py** - Project stack detection for dynamic tooling
 - **auto_claude_tools.py** - Custom MCP tools integration
 
+**Database Layer (Frontend):**
+- **apps/frontend/src/main/database.ts** - SQLite connection management (better-sqlite3)
+- **apps/frontend/src/main/database-schema.sql** - Schema definitions (tasks, projects, metadata, event_queue)
+- **apps/frontend/src/main/task-storage.ts** - Task CRUD operations with dual-write support
+- **apps/frontend/src/main/database-event-poller.ts** - Event queue poller for real-time IPC events
+- **apps/frontend/src/main/project-store.ts** - Project CRUD operations with dual-write support
+- **apps/frontend/src/main/ipc-handlers/task/export-handlers.ts** - JSON export/import for recovery
+
 **Integrations:**
 - **linear_updater.py** - Optional Linear integration for progress tracking
 - **runners/github/** - GitHub Issues & PRs automation
@@ -352,6 +360,118 @@ context = memory.get_context_for_session("Implementing feature X")
 memory.add_session_insight("Pattern: use React hooks for state")
 ```
 
+### SQLite Database Layer
+
+**Database Architecture (Frontend)** - `apps/frontend/src/main/`
+
+Auto Claude uses SQLite for task and project storage with real-time event synchronization:
+
+**Database Location:**
+- `<userData>/.auto-claude/tasks.db` (platform-specific user data directory)
+- Engine: better-sqlite3 (synchronous API optimized for Electron)
+- Mode: WAL (Write-Ahead Logging) enabled for concurrent read/write performance
+
+**Schema Tables:**
+- `tasks` - Task records (id, spec_id, project_id, title, description, status, metadata_json, created_at, updated_at)
+- `projects` - Project metadata (id, name, path, settings)
+- `metadata` - Application settings and schema versioning
+- `event_queue` - Buffer for IPC events (populated by triggers on INSERT/UPDATE/DELETE)
+
+**Database Patterns:**
+
+```typescript
+// Database connection (singleton pattern)
+import { DatabaseConnection } from './database';
+
+const db = DatabaseConnection.getInstance();
+const conn = db.getConnection(); // Returns better-sqlite3 Database instance
+
+// Transaction support (automatic commit/rollback)
+db.withTransaction(() => {
+  // All operations here are atomic
+  conn.prepare('UPDATE tasks SET status = ? WHERE id = ?').run('done', taskId);
+  conn.prepare('INSERT INTO event_queue ...').run(...);
+});
+
+// Task storage CRUD operations
+import { getTaskStorage } from './task-storage';
+
+const taskStorage = getTaskStorage();
+const task = taskStorage.createTask({ title, description, status, ... });
+taskStorage.updateTask(taskId, { status: 'in_progress' });
+taskStorage.deleteTask(taskId);
+const tasks = taskStorage.listTasks({ status: 'backlog', projectId: '123' });
+
+// Dual-write mode (controlled by ENABLE_DUAL_WRITE env var)
+// When ENABLE_DUAL_WRITE=true: writes to both SQLite + JSON files
+// When ENABLE_DUAL_WRITE=false: writes to SQLite only (default in Phase 4)
+```
+
+**Real-Time Events:**
+
+Database triggers automatically populate `event_queue` on task/project changes. The event poller (100ms interval) emits IPC events for instant UI updates:
+
+```typescript
+// Database triggers (in database-schema.sql)
+CREATE TRIGGER task_updated AFTER UPDATE ON tasks
+BEGIN
+  INSERT INTO event_queue (event_type, entity_id, entity_type, timestamp)
+  VALUES ('update', NEW.id, 'task', datetime('now'));
+END;
+
+// Event poller (database-event-poller.ts)
+// Polls event_queue every 100ms and emits IPC events:
+// - db:task:created / db:task:updated / db:task:deleted
+// - db:project:created / db:project:updated / db:project:deleted
+```
+
+**Migration Strategy:**
+
+The SQLite migration followed a phased approach:
+1. **Phase 1**: Dual-write (SQLite + JSON) for safety
+2. **Phase 2**: Task CRUD migration
+3. **Phase 3**: Event system (file watchers → database triggers)
+4. **Phase 4**: SQLite-only mode (ENABLE_DUAL_WRITE=false)
+5. **Phase 5**: Testing, cleanup, remove chokidar file watchers
+
+**Export/Import Recovery:**
+
+```typescript
+// Export all tasks to JSON backup
+// Via UI: Settings → Export Tasks
+// Creates: .auto-claude/backups/tasks-{timestamp}.json
+
+// Import tasks from JSON backup
+// Via UI: Settings → Import Tasks
+// Restores tasks from exported JSON file
+```
+
+**Setup for Development:**
+
+```bash
+cd apps/frontend
+
+# Install dependencies (includes better-sqlite3)
+npm install
+
+# Rebuild native modules for Electron
+npm run rebuild
+
+# Start development mode
+npm run dev
+```
+
+**Environment Variables:**
+- `ENABLE_DUAL_WRITE=false` - Default: SQLite-only mode
+- `ENABLE_DUAL_WRITE=true` - Dual-write mode (SQLite + JSON)
+
+**Critical Notes:**
+- Always run `npm run rebuild` after `npm install` (rebuilds better-sqlite3 for Electron)
+- better-sqlite3 MUST run in main process only (expose to renderer via IPC)
+- Use prepared statements for SQL injection prevention
+- Use `withTransaction()` for atomic multi-operation updates
+- Database file auto-created with schema on first app startup
+
 ## Development Guidelines
 
 ### Frontend Internationalization (i18n)
@@ -496,3 +616,5 @@ npm run dev      # Run in development mode (includes --remote-debugging-port=922
 
 **Project data storage:**
 - `.auto-claude/specs/` - Per-project data (specs, plans, QA reports, memory) - gitignored
+- `<userData>/.auto-claude/tasks.db` - SQLite database (tasks, projects, metadata)
+- `.auto-claude/backups/` - JSON backup files (export/import recovery)
