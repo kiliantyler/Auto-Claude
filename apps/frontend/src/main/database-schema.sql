@@ -12,6 +12,7 @@
 -- - Task history table for audit logging (Phase 4A)
 -- - FTS5 virtual table for full-text search (Phase 4B)
 -- - Undo stack table for undo/redo operations (Phase 4C)
+-- - Task metrics table for analytics and reporting (Phase 4D)
 -- - Indexes for query optimization (<100ms latency)
 -- - Triggers for automatic event emission on data changes
 -- - Triggers for automatic task history recording
@@ -112,6 +113,22 @@ CREATE TABLE IF NOT EXISTS undo_stack (
   description TEXT  -- Human-readable description of the operation
 );
 
+-- Task Metrics Table (Phase 4D)
+-- Stores daily aggregated metrics for analytics and reporting
+CREATE TABLE IF NOT EXISTS task_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  metric_date TEXT NOT NULL,  -- Date in ISO format (YYYY-MM-DD)
+  total_tasks INTEGER,
+  completed_tasks INTEGER,
+  in_progress_tasks INTEGER,
+  blocked_tasks INTEGER,
+  avg_completion_time_hours REAL,
+  created_count INTEGER,  -- Tasks created on this date
+  completed_count INTEGER,  -- Tasks completed on this date
+  UNIQUE(project_id, metric_date)
+);
+
 -- ============================================
 -- Full-Text Search (Phase 4B)
 -- ============================================
@@ -154,6 +171,10 @@ CREATE INDEX IF NOT EXISTS idx_task_history_session ON task_history(session_id);
 
 -- Undo stack indexes
 CREATE INDEX IF NOT EXISTS idx_undo_stack_session ON undo_stack(session_id, sequence);
+
+-- Task metrics indexes
+CREATE INDEX IF NOT EXISTS idx_task_metrics_date ON task_metrics(metric_date);
+CREATE INDEX IF NOT EXISTS idx_task_metrics_project ON task_metrics(project_id);
 
 -- ============================================
 -- Triggers for Event System
